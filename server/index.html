@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Task Voice Agent</title>
+    <title>Task Voice Agent - OpenAI Realtime</title>
     <style>
         * {
             margin: 0;
@@ -75,6 +75,13 @@
             box-shadow: 0 0 60px rgba(100, 255, 150, 0.5),
                         0 0 100px rgba(100, 255, 150, 0.3);
             animation: glow 1.5s ease-in-out infinite, float 4s ease-in-out infinite;
+        }
+
+        .orb.connecting {
+            background: radial-gradient(circle at 30% 30%, rgba(255, 193, 7, 0.8), rgba(255, 193, 7, 0.1));
+            box-shadow: 0 0 60px rgba(255, 193, 7, 0.5),
+                        0 0 100px rgba(255, 193, 7, 0.3);
+            animation: pulse 1s ease-in-out infinite, float 4s ease-in-out infinite;
         }
 
         .ripple {
@@ -208,6 +215,15 @@
             color: #fecaca;
         }
 
+        .info-message {
+            background: rgba(59, 130, 246, 0.2);
+            border: 1px solid rgba(59, 130, 246, 0.5);
+            border-radius: 10px;
+            padding: 1rem;
+            margin-top: 1rem;
+            color: #bfdbfe;
+        }
+
         @media (max-width: 768px) {
             h1 { font-size: 2rem; }
             .orb-container { width: 250px; height: 250px; }
@@ -220,7 +236,7 @@
 <body>
     <div class="container">
         <h1>Task Voice Agent</h1>
-        <p class="subtitle">Speak to create tasks naturally</p>
+        <p class="subtitle">Speak to create tasks naturally with OpenAI Realtime API</p>
 
         <div class="orb-container">
             <div class="orb" id="orb">
@@ -242,7 +258,6 @@
         </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
     <script>
         const orb = document.getElementById('orb');
         const status = document.getElementById('status');
@@ -251,18 +266,24 @@
         const transcriptBox = document.getElementById('transcriptBox');
         const transcript = document.getElementById('transcript');
 
-        let room = null;
+        let websocket = null;
         let isConnected = false;
+        let mediaRecorder = null;
+        let audioStream = null;
+        let isRecording = false;
 
-        // LiveKit connection configuration
-        const LIVEKIT_URL = 'ws://localhost:7880'; // Default local LiveKit URL
-        
+        // Configuration
+        const AUTH_SERVER_URL = 'http://localhost:8082';
+        const WEBSOCKET_URL = 'ws://localhost:8081';
+
         function updateOrbState(state) {
-            orb.classList.remove('speaking', 'listening');
+            orb.classList.remove('speaking', 'listening', 'connecting');
             if (state === 'speaking') {
                 orb.classList.add('speaking');
             } else if (state === 'listening') {
                 orb.classList.add('listening');
+            } else if (state === 'connecting') {
+                orb.classList.add('connecting');
             }
         }
 
@@ -291,111 +312,196 @@
             setTimeout(() => errorDiv.remove(), 5000);
         }
 
-        async function connect() {
-            try {
-                updateStatus('Connecting...');
-                
-                room = new LivekitClient.Room();
-                
-                // Set up event handlers
-                room.on('connected', () => {
-                    isConnected = true;
-                    updateStatus('Connected - Listening...');
-                    updateOrbState('listening');
-                    connectBtn.disabled = true;
-                    disconnectBtn.disabled = false;
-                    console.log('Connected to room');
-                });
-
-                room.on('disconnected', () => {
-                    isConnected = false;
-                    updateStatus('Disconnected');
-                    updateOrbState('idle');
-                    connectBtn.disabled = false;
-                    disconnectBtn.disabled = true;
-                    console.log('Disconnected from room');
-                });
-
-                room.on('trackSubscribed', (track, publication, participant) => {
-                    console.log('Track subscribed:', track.kind);
-                    
-                    if (track.kind === 'audio' && participant.identity !== 'agent') {
-                        updateOrbState('speaking');
-                        updateStatus('Agent speaking...');
-                    }
-                });
-
-                room.on('trackUnsubscribed', (track) => {
-                    if (track.kind === 'audio') {
-                        updateOrbState('listening');
-                        updateStatus('Listening...');
-                    }
-                });
-
-                room.on('participantConnected', (participant) => {
-                    console.log('Participant connected:', participant.identity);
-                });
-
-                // Connect to LiveKit room
-                // You'll need to get a token from your server
-                // For local development, you can use the LiveKit CLI to generate tokens
-                const token = await getToken();
-                await room.connect(LIVEKIT_URL, token);
-
-                // Enable microphone
-                await room.localParticipant.setMicrophoneEnabled(true);
-                
-            } catch (error) {
-                console.error('Connection error:', error);
-                updateStatus('Connection failed');
-                showError('Failed to connect. Make sure the agent is running.');
-                connectBtn.disabled = false;
-            }
+        function showInfo(message) {
+            const infoDiv = document.createElement('div');
+            infoDiv.className = 'info-message';
+            infoDiv.textContent = message;
+            document.querySelector('.container').appendChild(infoDiv);
+            setTimeout(() => infoDiv.remove(), 5000);
         }
 
-        async function getToken() {
+        async function getAuthToken() {
             try {
-                // Try token server first (if running)
-                const response = await fetch('http://localhost:8080/token', {
+                const response = await fetch(`${AUTH_SERVER_URL}/token`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        room: 'task-agent',
-                        identity: 'user-' + Math.random().toString(36).substring(7)
+                        user_id: 'user-' + Math.random().toString(36).substring(7),
+                        room: 'task-agent'
                     })
                 });
                 
                 if (!response.ok) {
-                    throw new Error('Token server not responding');
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
                 }
                 
                 const data = await response.json();
                 return data.token;
             } catch (error) {
-                console.error('Token server error:', error);
+                console.error('Token generation error:', error);
+                throw new Error(`Failed to get authentication token: ${error.message}`);
+            }
+        }
+
+        async function startAudioRecording() {
+            try {
+                audioStream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        echoCancellation: true,
+                        noiseSuppression: true
+                    } 
+                });
                 
-                // Fallback: Manual token (paste from CLI)
-                // Generate with: lk token create --join --room task-agent --identity user
-                const manualToken = ''; // Paste your token here
+                mediaRecorder = new MediaRecorder(audioStream, {
+                    mimeType: 'audio/webm;codecs=opus'
+                });
                 
-                if (manualToken) {
-                    return manualToken;
-                }
+                mediaRecorder.ondataavailable = async (event) => {
+                    if (event.data.size > 0 && websocket && websocket.readyState === WebSocket.OPEN) {
+                        const arrayBuffer = await event.data.arrayBuffer();
+                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+                        
+                        websocket.send(JSON.stringify({
+                            type: 'audio',
+                            audio: base64Audio
+                        }));
+                    }
+                };
                 
-                throw new Error(
-                    'Token generation failed. Either:\n' +
-                    '1. Run token server: python token_server.py\n' +
-                    '2. Generate token manually: lk token create --join --room task-agent --identity user\n' +
-                    '   Then paste it in the manualToken variable'
-                );
+                // Start recording in chunks
+                mediaRecorder.start(100); // Record in 100ms chunks
+                isRecording = true;
+                
+            } catch (error) {
+                console.error('Error starting audio recording:', error);
+                throw new Error(`Failed to access microphone: ${error.message}`);
+            }
+        }
+
+        function stopAudioRecording() {
+            if (mediaRecorder && isRecording) {
+                mediaRecorder.stop();
+                isRecording = false;
+            }
+            
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+        }
+
+        async function connect() {
+            try {
+                updateStatus('Getting authentication token...');
+                updateOrbState('connecting');
+                
+                const token = await getAuthToken();
+                
+                updateStatus('Connecting to voice agent...');
+                
+                websocket = new WebSocket(WEBSOCKET_URL);
+                
+                websocket.onopen = async () => {
+                    isConnected = true;
+                    updateStatus('Connected - Starting audio...');
+                    
+                    // Send connection message
+                    websocket.send(JSON.stringify({
+                        type: 'connect',
+                        token: token
+                    }));
+                    
+                    // Start audio recording
+                    await startAudioRecording();
+                    
+                    updateStatus('Listening...');
+                    updateOrbState('listening');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                    
+                    showInfo('Connected! You can now speak to create tasks.');
+                };
+                
+                websocket.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        switch (data.type) {
+                            case 'connected':
+                                updateStatus('Connected - Listening...');
+                                updateOrbState('listening');
+                                showInfo('Voice agent is ready!');
+                                break;
+                                
+                            case 'audio_received':
+                                updateOrbState('speaking');
+                                updateStatus('Agent processing...');
+                                break;
+                                
+                            case 'response':
+                                updateOrbState('listening');
+                                updateStatus('Listening...');
+                                if (data.message) {
+                                    addTranscript('agent', data.message);
+                                }
+                                break;
+                                
+                            case 'error':
+                                updateOrbState('idle');
+                                updateStatus('Error occurred');
+                                showError(data.message);
+                                break;
+                                
+                            case 'disconnected':
+                                updateOrbState('idle');
+                                updateStatus('Disconnected');
+                                break;
+                                
+                            default:
+                                console.log('Unknown message type:', data.type);
+                        }
+                    } catch (error) {
+                        console.error('Error parsing WebSocket message:', error);
+                    }
+                };
+                
+                websocket.onclose = () => {
+                    isConnected = false;
+                    updateStatus('Disconnected');
+                    updateOrbState('idle');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    stopAudioRecording();
+                };
+                
+                websocket.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    updateStatus('Connection error');
+                    showError('Failed to connect to voice agent. Make sure the server is running.');
+                    connectBtn.disabled = false;
+                };
+                
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateStatus('Connection failed');
+                updateOrbState('idle');
+                showError(error.message);
+                connectBtn.disabled = false;
             }
         }
 
         function disconnect() {
-            if (room) {
-                room.disconnect();
-                room = null;
+            if (websocket) {
+                websocket.send(JSON.stringify({
+                    type: 'disconnect'
+                }));
+                websocket.close();
+                websocket = null;
             }
+            
+            stopAudioRecording();
             updateStatus('Disconnected');
             updateOrbState('idle');
             connectBtn.disabled = false;
@@ -409,12 +515,29 @@
         // Handle page visibility changes
         document.addEventListener('visibilitychange', () => {
             if (document.hidden && isConnected) {
-                // Page is hidden, maintain connection but notify user
                 updateStatus('Running in background...');
             } else if (isConnected) {
                 updateStatus('Listening...');
             }
         });
+
+        // Handle page unload
+        window.addEventListener('beforeunload', () => {
+            if (isConnected) {
+                disconnect();
+            }
+        });
+
+        // Check if required APIs are available
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            showError('Your browser does not support audio recording. Please use a modern browser.');
+            connectBtn.disabled = true;
+        }
+
+        if (!window.WebSocket) {
+            showError('Your browser does not support WebSockets. Please use a modern browser.');
+            connectBtn.disabled = true;
+        }
     </script>
 </body>
 </html>
