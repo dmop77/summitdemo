@@ -1,12 +1,16 @@
 # Pulpoo Voice Agent
 
-Voice agent that creates tasks in Pulpoo using OpenAI Realtime API with speech-to-speech architecture.
+Voice agent that creates tasks in Pulpoo using Deepgram Flux for advanced turn detection, OpenAI for LLM processing, and Deepgram TTS for natural responses.
 
 ## Overview
 
-- **Speech-to-Speech**: Direct audio processing using OpenAI's Realtime API
+- **Flux STT**: Deepgram Flux with model-integrated turn detection
+- **Advanced Turn Detection**: EndOfTurn events for natural conversation flow
+- **LLM Processing**: OpenAI GPT-4o for conversation understanding and function calling
+- **Text-to-Speech**: Deepgram Aura-Asteria natural voice
 - **Task Creation**: Creates tasks in Pulpoo through conversational interface
 - **Real-time Communication**: WebSocket-based audio streaming
+- **Interruption Handling**: Barge-in support when user starts speaking
 - **Web Interface**: Modern UI for voice interaction
 
 ## Quick Start
@@ -19,8 +23,12 @@ source venv/bin/activate
 pip install -r requirements.txt
 
 # 2. Configure API keys
-echo "OPENAI_API_KEY=sk-your-openai-key" > .env
-echo "PULPOO_API_KEY=your-pulpoo-key" >> .env
+cd agent
+touch .env
+# Edit .env and add your API keys:
+# OPENAI_API_KEY=sk-your-openai-key
+# DEEPGRAM_API_KEY=your-deepgram-key
+# PULPOO_API_KEY=cwz-your-pulpoo-key
 
 # 3. Start system
 cd ..
@@ -33,6 +41,7 @@ open server/index.html
 ## Requirements
 
 ```bash
+deepgram-sdk>=3.8.0
 openai>=1.50.0
 python-dotenv>=1.0.0
 aiohttp>=3.9.0
@@ -42,17 +51,20 @@ flask-cors>=4.0.0
 pytz>=2023.3
 websockets>=12.0
 requests>=2.31.0
+sounddevice>=0.4.6
+numpy>=1.26.0
 ```
 
 ## API Keys Required
 
-- **OpenAI API Key**: Get from [OpenAI Platform](https://platform.openai.com/api-keys)
-- **Pulpoo API Key**: Get from your Pulpoo account
+- **Deepgram API Key**: Get from [Deepgram Console](https://console.deepgram.com/signup) - Used for Flux STT and Aura TTS (includes $200 free credit)
+- **OpenAI API Key**: Get from [OpenAI Platform](https://platform.openai.com/api-keys) - Used for GPT-4o LLM processing
+- **Pulpoo API Key**: Get from your Pulpoo account - Used for task creation
 
 ## Services
 
-- **Authentication Server** (Port 8082): Token generation and validation
-- **Web Interface**: http://localhost:8080
+- **Flux Voice Server** (Port 8084): WebSocket server using Flux STT + OpenAI + Deepgram TTS
+- **Web Interface**: Open `server/index.html` in your browser
 
 ## Usage
 
@@ -64,4 +76,34 @@ requests>=2.31.0
 
 ## Task Assignment
 
-Tasks are automatically assigned to `cuevas@pulpoo.com` with HIGH priority by default.
+Tasks are automatically assigned to:
+- `efernandez@pulpoo.com`
+- `perezmd324@gmail.com`
+
+With HIGH priority by default.
+
+## Documentation
+
+- **Setup Guide**: See `SETUP_INSTRUCTIONS.md` for detailed setup steps
+- **Test Connection**: Run `python agent/test_deepgram_connection.py` to verify Deepgram setup
+
+## Architecture
+
+This system uses the **Flux Voice Agent Pattern**:
+
+```mermaid
+flowchart LR
+    A[User Audio] --> B["Flux STT<br/>(Turn Detection)"]
+    B --> C["OpenAI GPT-4o<br/>(LLM)"]
+    C --> D["Deepgram Aura<br/>(TTS)"]
+    D --> E[Agent Audio Output]
+    C --> F["Pulpoo API<br/>(Task Creation)"]
+```
+
+**Key Features**:
+1. **Flux STT** with model-integrated EndOfTurn detection
+2. **OpenAI GPT-4o** for natural language understanding and function calling
+3. **Deepgram Aura TTS** for natural voice responses
+4. **Pulpoo API** for task creation
+5. **WebSocket** for real-time bidirectional audio streaming
+6. **Interruption Handling** - User can interrupt agent at any time

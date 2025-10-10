@@ -496,6 +496,11 @@
                     throw new Error("Failed to get audio stream from microphone");
                 }
                 
+                // Defensive check: audioContext might have been closed during getUserMedia await
+                if (!audioContext) {
+                    throw new Error("Audio setup aborted: AudioContext was closed during connection attempt.");
+                }
+                
                 console.log('Got audio stream, creating media stream source...');
                 microphone = audioContext.createMediaStreamSource(audioStream);
                 
