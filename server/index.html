@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Task Voice Agent</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        .container {
+            text-align: center;
+            color: white;
+            max-width: 600px;
+            width: 90%;
+        }
+
+        h1 {
+            font-size: 2.5rem;
+            margin-bottom: 1rem;
+            font-weight: 600;
+        }
+
+        .subtitle {
+            font-size: 1.1rem;
+            margin-bottom: 3rem;
+            opacity: 0.9;
+        }
+
+        .orb-container {
+            position: relative;
+            width: 300px;
+            height: 300px;
+            margin: 0 auto 3rem;
+        }
+
+        .orb {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            background: radial-gradient(circle at 30% 30%, rgba(255, 255, 255, 0.8), rgba(255, 255, 255, 0.1));
+            box-shadow: 0 0 60px rgba(255, 255, 255, 0.4),
+                        0 0 100px rgba(255, 255, 255, 0.2),
+                        inset 0 0 40px rgba(255, 255, 255, 0.2);
+            animation: float 4s ease-in-out infinite;
+            transition: all 0.3s ease;
+        }
+
+        .orb.speaking {
+            animation: pulse 0.8s ease-in-out infinite, float 4s ease-in-out infinite;
+            box-shadow: 0 0 80px rgba(255, 255, 255, 0.6),
+                        0 0 140px rgba(255, 255, 255, 0.4),
+                        inset 0 0 60px rgba(255, 255, 255, 0.3);
+        }
+
+        .orb.listening {
+            background: radial-gradient(circle at 30% 30%, rgba(100, 255, 150, 0.8), rgba(100, 255, 150, 0.1));
+            box-shadow: 0 0 60px rgba(100, 255, 150, 0.5),
+                        0 0 100px rgba(100, 255, 150, 0.3);
+            animation: glow 1.5s ease-in-out infinite, float 4s ease-in-out infinite;
+        }
+
+        .ripple {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 200px;
+            height: 200px;
+            border-radius: 50%;
+            border: 2px solid rgba(255, 255, 255, 0.5);
+            opacity: 0;
+        }
+
+        .orb.speaking .ripple {
+            animation: ripple 1.5s ease-out infinite;
+        }
+
+        .orb.listening .ripple {
+            border-color: rgba(100, 255, 150, 0.5);
+            animation: ripple 1.5s ease-out infinite;
+        }
+
+        @keyframes float {
+            0%, 100% { transform: translate(-50%, -50%) translateY(0px); }
+            50% { transform: translate(-50%, -50%) translateY(-20px); }
+        }
+
+        @keyframes pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50% { transform: translate(-50%, -50%) scale(1.1); }
+        }
+
+        @keyframes glow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        @keyframes ripple {
+            0% {
+                width: 200px;
+                height: 200px;
+                opacity: 0.6;
+            }
+            100% {
+                width: 350px;
+                height: 350px;
+                opacity: 0;
+            }
+        }
+
+        .status {
+            font-size: 1.2rem;
+            margin-bottom: 1rem;
+            min-height: 30px;
+            font-weight: 500;
+        }
+
+        .controls {
+            display: flex;
+            gap: 1rem;
+            justify-content: center;
+            margin-top: 2rem;
+        }
+
+        button {
+            padding: 1rem 2rem;
+            font-size: 1rem;
+            border: 2px solid white;
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            border-radius: 50px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            font-weight: 600;
+        }
+
+        button:hover {
+            background: rgba(255, 255, 255, 0.2);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 0, 0, 0.2);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.primary {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .transcript-box {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 1.5rem;
+            margin-top: 2rem;
+            max-height: 200px;
+            overflow-y: auto;
+            text-align: left;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .transcript-item {
+            margin-bottom: 1rem;
+            line-height: 1.6;
+        }
+
+        .transcript-user {
+            color: #a7f3d0;
+            font-weight: 600;
+        }
+
+        .transcript-agent {
+            color: #fbbf24;
+            font-weight: 600;
+        }
+
+        .error-message {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.5);
+            border-radius: 10px;
+            padding: 1rem;
+            margin-top: 1rem;
+            color: #fecaca;
+        }
+
+        @media (max-width: 768px) {
+            h1 { font-size: 2rem; }
+            .orb-container { width: 250px; height: 250px; }
+            .orb { width: 150px; height: 150px; }
+            .controls { flex-direction: column; }
+            button { width: 100%; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Task Voice Agent</h1>
+        <p class="subtitle">Speak to create tasks naturally</p>
+
+        <div class="orb-container">
+            <div class="orb" id="orb">
+                <div class="ripple"></div>
+                <div class="ripple" style="animation-delay: 0.5s;"></div>
+                <div class="ripple" style="animation-delay: 1s;"></div>
+            </div>
+        </div>
+
+        <div class="status" id="status">Click "Connect" to start</div>
+
+        <div class="controls">
+            <button id="connectBtn" class="primary">Connect</button>
+            <button id="disconnectBtn" disabled>Disconnect</button>
+        </div>
+
+        <div class="transcript-box" id="transcriptBox" style="display: none;">
+            <div id="transcript"></div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+    <script>
+        const orb = document.getElementById('orb');
+        const status = document.getElementById('status');
+        const connectBtn = document.getElementById('connectBtn');
+        const disconnectBtn = document.getElementById('disconnectBtn');
+        const transcriptBox = document.getElementById('transcriptBox');
+        const transcript = document.getElementById('transcript');
+
+        let room = null;
+        let isConnected = false;
+
+        // LiveKit connection configuration
+        const LIVEKIT_URL = 'ws://localhost:7880'; // Default local LiveKit URL
+        
+        function updateOrbState(state) {
+            orb.classList.remove('speaking', 'listening');
+            if (state === 'speaking') {
+                orb.classList.add('speaking');
+            } else if (state === 'listening') {
+                orb.classList.add('listening');
+            }
+        }
+
+        function updateStatus(message) {
+            status.textContent = message;
+        }
+
+        function addTranscript(type, text) {
+            transcriptBox.style.display = 'block';
+            const item = document.createElement('div');
+            item.className = 'transcript-item';
+            const label = document.createElement('span');
+            label.className = type === 'user' ? 'transcript-user' : 'transcript-agent';
+            label.textContent = type === 'user' ? 'You: ' : 'Agent: ';
+            item.appendChild(label);
+            item.appendChild(document.createTextNode(text));
+            transcript.appendChild(item);
+            transcriptBox.scrollTop = transcriptBox.scrollHeight;
+        }
+
+        function showError(message) {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error-message';
+            errorDiv.textContent = message;
+            document.querySelector('.container').appendChild(errorDiv);
+            setTimeout(() => errorDiv.remove(), 5000);
+        }
+
+        async function connect() {
+            try {
+                updateStatus('Connecting...');
+                
+                room = new LivekitClient.Room();
+                
+                // Set up event handlers
+                room.on('connected', () => {
+                    isConnected = true;
+                    updateStatus('Connected - Listening...');
+                    updateOrbState('listening');
+                    connectBtn.disabled = true;
+                    disconnectBtn.disabled = false;
+                    console.log('Connected to room');
+                });
+
+                room.on('disconnected', () => {
+                    isConnected = false;
+                    updateStatus('Disconnected');
+                    updateOrbState('idle');
+                    connectBtn.disabled = false;
+                    disconnectBtn.disabled = true;
+                    console.log('Disconnected from room');
+                });
+
+                room.on('trackSubscribed', (track, publication, participant) => {
+                    console.log('Track subscribed:', track.kind);
+                    
+                    if (track.kind === 'audio' && participant.identity !== 'agent') {
+                        updateOrbState('speaking');
+                        updateStatus('Agent speaking...');
+                    }
+                });
+
+                room.on('trackUnsubscribed', (track) => {
+                    if (track.kind === 'audio') {
+                        updateOrbState('listening');
+                        updateStatus('Listening...');
+                    }
+                });
+
+                room.on('participantConnected', (participant) => {
+                    console.log('Participant connected:', participant.identity);
+                });
+
+                // Connect to LiveKit room
+                // You'll need to get a token from your server
+                // For local development, you can use the LiveKit CLI to generate tokens
+                const token = await getToken();
+                await room.connect(LIVEKIT_URL, token);
+
+                // Enable microphone
+                await room.localParticipant.setMicrophoneEnabled(true);
+                
+            } catch (error) {
+                console.error('Connection error:', error);
+                updateStatus('Connection failed');
+                showError('Failed to connect. Make sure the agent is running.');
+                connectBtn.disabled = false;
+            }
+        }
+
+        async function getToken() {
+            try {
+                // Try token server first (if running)
+                const response = await fetch('http://localhost:8080/token', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        room: 'task-agent',
+                        identity: 'user-' + Math.random().toString(36).substring(7)
+                    })
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Token server not responding');
+                }
+                
+                const data = await response.json();
+                return data.token;
+            } catch (error) {
+                console.error('Token server error:', error);
+                
+                // Fallback: Manual token (paste from CLI)
+                // Generate with: lk token create --join --room task-agent --identity user
+                const manualToken = ''; // Paste your token here
+                
+                if (manualToken) {
+                    return manualToken;
+                }
+                
+                throw new Error(
+                    'Token generation failed. Either:\n' +
+                    '1. Run token server: python token_server.py\n' +
+                    '2. Generate token manually: lk token create --join --room task-agent --identity user\n' +
+                    '   Then paste it in the manualToken variable'
+                );
+            }
+        }
+
+        function disconnect() {
+            if (room) {
+                room.disconnect();
+                room = null;
+            }
+            updateStatus('Disconnected');
+            updateOrbState('idle');
+            connectBtn.disabled = false;
+            disconnectBtn.disabled = true;
+        }
+
+        // Event listeners
+        connectBtn.addEventListener('click', connect);
+        disconnectBtn.addEventListener('click', disconnect);
+
+        // Handle page visibility changes
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden && isConnected) {
+                // Page is hidden, maintain connection but notify user
+                updateStatus('Running in background...');
+            } else if (isConnected) {
+                updateStatus('Listening...');
+            }
+        });
+    </script>
+</body>
+</html>
