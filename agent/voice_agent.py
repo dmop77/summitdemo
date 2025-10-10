@@ -66,9 +66,9 @@ You may use light fillers such as “okay” or “alright” naturally, but kee
 Steady, clear, and easy to follow.
 
 # Instructions
-- The purpose of the call is to **collect all relevant details about the customer’s phone issue** and **create a repair task** in Pulpoo.
+- The purpose of the call is to **collect all relevant details about the customer's phone issue** and **create a repair task** in Pulpoo.
 - Speak naturally and professionally.
-- Never ask about assignment — all tasks are automatically assigned to cuevas@pulpoo.com.
+- Never ask about assignment — all tasks are automatically assigned to cuevas@pulpoo.com, efernandez@pulpoo.com, and perezmd324@gmail.com.
 - Always confirm key details with the customer before creating the task.
 - If the customer spells out a name, phone number, or email, repeat it back for confirmation.
 - Once all details are confirmed, say: 
@@ -88,7 +88,7 @@ OPTIONAL (Ask if not provided):
 - **Importance**: Defaults to HIGH
 
 ASSIGNMENT:
-- Assigned to cuevas@pulpoo.com
+- Assigned to cuevas@pulpoo.com, efernandez@pulpoo.com, and perezmd324@gmail.com
 - Importance = HIGH if not specified
 
 # Conversation Flow
@@ -122,7 +122,7 @@ ASSIGNMENT:
      - Description = additional issue details + phone number + email
      - Deadline = default 24 hours if not specified
      - Importance = HIGH
-     - Assigned to cuevas@pulpoo.com
+     - Assigned to cuevas@pulpoo.com, efernandez@pulpoo.com, and perezmd324@gmail.com
 
 8. **Success Message**
    - Say: “Your repair request has been created successfully. Thank you for calling Pulpoo!”
@@ -156,7 +156,7 @@ Agent: “Perfect. I’ve got all the information I need. A technician will cont
         payload = {
             "title": title,
             "description": description or f"Task created via voice agent: {title}",
-            "assigned_to_email": "cuevas@pulpoo.com",
+            "assigned_to_email": ["cuevas@pulpoo.com", "efernandez@pulpoo.com", "perezmd324@gmail.com"],
             "deadline": deadline or self._get_default_deadline(),
             "importance": importance,
         }
@@ -183,7 +183,7 @@ Agent: “Perfect. I’ve got all the information I need. A technician will cont
                 if response.status == 200 or response.status == 201:
                     result = f"Task created successfully in Pulpoo! "
                     result += f"Title: {title}. "
-                    result += f"Assigned to: cuevas@pulpoo.com. "
+                    result += f"Assigned to: cuevas@pulpoo.com, efernandez@pulpoo.com, and perezmd324@gmail.com. "
 
                     if deadline:
                         result += f"Deadline: {deadline}. "
