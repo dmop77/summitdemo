@@ -37,27 +37,23 @@ def test_pulpoo_connection():
     deadline_dt = datetime.now(pytz.UTC) + timedelta(hours=24)
     deadline = deadline_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    # Test payload with the three users
+    # Test payload with a single user (API expects string, not array)
     payload = {
         "title": "Test Task - Summit Demo",
-        "description": "This is a test task created by the Pulpoo API connection test script. Testing assignment to multiple users.",
-        "assigned_to_email": [
-            "cuevas@pulpoo.com",
-            "efernandez@pulpoo.com",
-            "perezmd324@gmail.com"
-        ],
+        "description": "This is a test task created by the Pulpoo API connection test script. Testing assignment to a single user.",
+        "assigned_to_email":  "perezmd324@gmail.com",
         "deadline": deadline,
-        "importance": "HIGH"
+        "importance": "HIGH",
+        "canal": "Engineering"
     }
     
     print("📝 Test Data:")
     print(f"   Title: {payload['title']}")
     print(f"   Description: {payload['description']}")
-    print(f"   Assigned to:")
-    for email in payload['assigned_to_email']:
-        print(f"     • {email}")
+    print(f"   Assigned to: {payload['assigned_to_email']}")
     print(f"   Deadline: {deadline}")
     print(f"   Importance: {payload['importance']}")
+    print(f"   Canal: {payload['canal']}")
     print()
     
     # API endpoint and headers
@@ -96,10 +92,8 @@ def test_pulpoo_connection():
             print("=" * 60)
             print()
             print("✓ Connection is working properly")
-            print("✓ All three users are assigned correctly:")
-            print("  • cuevas@pulpoo.com")
-            print("  • efernandez@pulpoo.com")
-            print("  • perezmd324@gmail.com")
+            print("✓ User assigned correctly:")
+            print(f"  • {payload['assigned_to_email']}")
             return True
         else:
             print("=" * 60)
