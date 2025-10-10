@@ -36,9 +36,45 @@ def health_check():
         "service": "voice-agent-auth"
     })
 
+@app.route('/session', methods=['POST'])
+def create_session():
+    """Create an ephemeral key for OpenAI Realtime API."""
+    try:
+        import requests
+        
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+        if not openai_api_key:
+            return jsonify({"error": "OPENAI_API_KEY not configured"}), 500
+        
+        # Request ephemeral key from OpenAI
+        response = requests.post(
+            "https://api.openai.com/v1/realtime/sessions",
+            headers={
+                "Authorization": f"Bearer {openai_api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "gpt-4o-realtime-preview-2024-10-01",
+                "voice": "alloy"
+            },
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            session_data = response.json()
+            logger.info(f"Created Realtime session: {session_data.get('id')}")
+            return jsonify(session_data)
+        else:
+            logger.error(f"OpenAI API error: {response.status_code} - {response.text}")
+            return jsonify({"error": "Failed to create session"}), response.status_code
+            
+    except Exception as e:
+        logger.error(f"Error creating session: {e}")
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/token', methods=['POST'])
 def generate_token():
-    """Generate an authentication token for the voice agent."""
+    """Generate an authentication token for the voice agent (legacy)."""
     try:
         data = request.get_json() or {}
         user_id = data.get('user_id', 'anonymous')

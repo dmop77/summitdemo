@@ -113,28 +113,17 @@ AUTH_PID=$!
 cd ..
 sleep 2
 
-# Start WebSocket server in background
-print_status "Starting WebSocket server..."
-cd agent
-source venv/bin/activate
-python realtime_server.py > realtime_server.log 2>&1 &
-WEBSOCKET_PID=$!
-cd ..
-sleep 3
-
 print_success "All services started!"
 echo ""
-echo "🌐 Web Interface: http://localhost:8082 (or open server/index.html)"
+echo "🌐 Web Interface: Open server/index.html in your browser"
 echo "🔐 Auth Server: http://localhost:8082"
-echo "🔗 WebSocket Server: ws://localhost:8081"
+echo "🔗 Realtime API: Connects directly to OpenAI"
 echo ""
 echo "📋 Services running:"
 echo "  - Authentication Server (PID: $AUTH_PID)"
-echo "  - WebSocket Server (PID: $WEBSOCKET_PID)"
 echo ""
 echo "📝 Logs:"
 echo "  - Auth Server: agent/auth_server.log"
-echo "  - WebSocket Server: agent/realtime_server.log"
 echo ""
 echo "🎯 Usage:"
 echo "  1. Open http://localhost:8080 in your browser"

@@ -266,15 +266,17 @@
         const transcriptBox = document.getElementById('transcriptBox');
         const transcript = document.getElementById('transcript');
 
-        let websocket = null;
+        let realtimeWs = null;
         let isConnected = false;
-        let mediaRecorder = null;
+        let audioContext = null;
+        let microphone = null;
         let audioStream = null;
-        let isRecording = false;
+        let audioQueue = [];
+        let isPlaying = false;
+        let nextPlaybackTime = 0;
 
-        // Configuration
+        // Configuration - get ephemeral key from your server
         const AUTH_SERVER_URL = 'http://localhost:8082';
-        const WEBSOCKET_URL = 'ws://localhost:8081';
 
         function updateOrbState(state) {
             orb.classList.remove('speaking', 'listening', 'connecting');
@@ -320,15 +322,11 @@
             setTimeout(() => infoDiv.remove(), 5000);
         }
 
-        async function getAuthToken() {
+        async function getEphemeralKey() {
             try {
-                const response = await fetch(`${AUTH_SERVER_URL}/token`, {
+                const response = await fetch(`${AUTH_SERVER_URL}/session`, {
                     method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        user_id: 'user-' + Math.random().toString(36).substring(7),
-                        room: 'task-agent'
-                    })
+                    headers: { 'Content-Type': 'application/json' }
                 });
                 
                 if (!response.ok) {
@@ -336,151 +334,279 @@
                 }
                 
                 const data = await response.json();
-                return data.token;
+                return data.client_secret.value;
             } catch (error) {
-                console.error('Token generation error:', error);
-                throw new Error(`Failed to get authentication token: ${error.message}`);
+                console.error('Failed to get ephemeral key:', error);
+                throw new Error(`Failed to get ephemeral key: ${error.message}`);
             }
         }
 
-        async function startAudioRecording() {
+        async function setupAudio() {
             try {
+                audioContext = new AudioContext({ sampleRate: 24000 });
+                
+                // Resume audio context if suspended (required by modern browsers)
+                if (audioContext.state === 'suspended') {
+                    await audioContext.resume();
+                }
+                
+                console.log('Audio context state:', audioContext.state);
+                console.log('Audio context sample rate:', audioContext.sampleRate);
+                
                 audioStream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
-                        sampleRate: 16000,
+                        sampleRate: 24000,
                         channelCount: 1,
                         echoCancellation: true,
-                        noiseSuppression: true
+                        noiseSuppression: true,
+                        autoGainControl: true
                     } 
                 });
                 
-                mediaRecorder = new MediaRecorder(audioStream, {
-                    mimeType: 'audio/webm;codecs=opus'
-                });
+                microphone = audioContext.createMediaStreamSource(audioStream);
                 
-                mediaRecorder.ondataavailable = async (event) => {
-                    if (event.data.size > 0 && websocket && websocket.readyState === WebSocket.OPEN) {
-                        const arrayBuffer = await event.data.arrayBuffer();
-                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
-                        
-                        websocket.send(JSON.stringify({
-                            type: 'audio',
+                // Create audio worklet for processing
+                await audioContext.audioWorklet.addModule(`data:text/javascript,
+                    class AudioProcessor extends AudioWorkletProcessor {
+                        process(inputs, outputs, parameters) {
+                            const input = inputs[0];
+                            if (input && input.length > 0) {
+                                const channelData = input[0];
+                                const pcm16 = new Int16Array(channelData.length);
+                                for (let i = 0; i < channelData.length; i++) {
+                                    const s = Math.max(-1, Math.min(1, channelData[i]));
+                                    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                                }
+                                this.port.postMessage(pcm16.buffer);
+                            }
+                            return true;
+                        }
+                    }
+                    registerProcessor('audio-processor', AudioProcessor);
+                `);
+                
+                const processorNode = new AudioWorkletNode(audioContext, 'audio-processor');
+                processorNode.port.onmessage = (event) => {
+                    if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
+                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(event.data)));
+                        realtimeWs.send(JSON.stringify({
+                            type: 'input_audio_buffer.append',
                             audio: base64Audio
                         }));
                     }
                 };
                 
-                // Start recording in chunks
-                mediaRecorder.start(100); // Record in 100ms chunks
-                isRecording = true;
+                microphone.connect(processorNode);
                 
+                return true;
             } catch (error) {
-                console.error('Error starting audio recording:', error);
-                throw new Error(`Failed to access microphone: ${error.message}`);
+                console.error('Error setting up audio:', error);
+                throw new Error(`Failed to setup audio: ${error.message}`);
             }
         }
 
-        function stopAudioRecording() {
-            if (mediaRecorder && isRecording) {
-                mediaRecorder.stop();
-                isRecording = false;
-            }
-            
-            if (audioStream) {
-                audioStream.getTracks().forEach(track => track.stop());
-                audioStream = null;
+        function JSON_dumps(obj) {
+            return JSON.stringify(obj);
+        }
+
+        function playAudioChunk(base64Audio) {
+            try {
+                console.log('Playing audio chunk, base64 length:', base64Audio.length);
+                
+                // Decode base64 to binary
+                const binaryString = atob(base64Audio);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                
+                // Convert PCM16 to Float32 for Web Audio API
+                const pcm16 = new Int16Array(bytes.buffer);
+                const float32 = new Float32Array(pcm16.length);
+                for (let i = 0; i < pcm16.length; i++) {
+                    float32[i] = pcm16[i] / 32768.0;
+                }
+                
+                console.log('Audio buffer size:', float32.length, 'samples');
+                
+                // Create audio buffer and play
+                const audioBuffer = audioContext.createBuffer(1, float32.length, 24000);
+                audioBuffer.getChannelData(0).set(float32);
+                
+                const source = audioContext.createBufferSource();
+                source.buffer = audioBuffer;
+                source.connect(audioContext.destination);
+                
+                // Schedule playback to maintain continuity
+                const currentTime = audioContext.currentTime;
+                if (nextPlaybackTime < currentTime) {
+                    nextPlaybackTime = currentTime;
+                }
+                source.start(nextPlaybackTime);
+                nextPlaybackTime += audioBuffer.duration;
+                
+                console.log('Audio scheduled to play at:', nextPlaybackTime - audioBuffer.duration);
+                return true;
+            } catch (error) {
+                console.error('Error playing audio chunk:', error);
+                return false;
             }
         }
 
         async function connect() {
             try {
-                updateStatus('Getting authentication token...');
+                updateStatus('Getting session token...');
                 updateOrbState('connecting');
                 
-                const token = await getAuthToken();
+                const ephemeralKey = await getEphemeralKey();
                 
-                updateStatus('Connecting to voice agent...');
+                updateStatus('Connecting to OpenAI Realtime API...');
                 
-                websocket = new WebSocket(WEBSOCKET_URL);
+                const url = `wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01`;
+                realtimeWs = new WebSocket(url, ['realtime', `openai-insecure-api-key.${ephemeralKey}`, 'openai-beta.realtime-v1']);
                 
-                websocket.onopen = async () => {
-                    isConnected = true;
-                    updateStatus('Connected - Starting audio...');
+                realtimeWs.onopen = async () => {
+                    console.log('Connected to OpenAI Realtime API');
+                    updateStatus('Setting up audio...');
                     
-                    // Send connection message
-                    websocket.send(JSON.stringify({
-                        type: 'connect',
-                        token: token
+                    // Setup audio
+                    await setupAudio();
+                    
+                    // Send session configuration
+                    realtimeWs.send(JSON_dumps({
+                        type: 'session.update',
+                        session: {
+                            modalities: ['text', 'audio'],
+                            instructions: `You are a professional task management assistant for Pulpoo, helping users create tasks efficiently through voice conversation.
+
+YOUR ROLE:
+- ALWAYS greet the user first when they connect - don't wait for them to speak
+- Capture task information through natural, friendly conversation
+- Ask clarifying questions when details are unclear or missing
+- Confirm all details before creating the task
+- Be concise but thorough
+
+TASK INFORMATION TO COLLECT:
+REQUIRED: Title (clear, descriptive task title)
+OPTIONAL: Description, Deadline (specific date/time), Importance (LOW, MEDIUM, HIGH - defaults to HIGH)
+
+IMPORTANT:
+- All tasks assigned to cuevas@pulpoo.com automatically
+- Default deadline: 24 hours from now
+- Default importance: HIGH
+
+Keep responses natural and conversational. Be professional but approachable.`,
+                            voice: 'alloy',
+                            input_audio_format: 'pcm16',
+                            output_audio_format: 'pcm16',
+                            input_audio_transcription: { model: 'whisper-1' },
+                            turn_detection: {
+                                type: 'server_vad',
+                                threshold: 0.5,
+                                prefix_padding_ms: 300,
+                                silence_duration_ms: 500
+                            },
+                            temperature: 0.8
+                        }
                     }));
                     
-                    // Start audio recording
-                    await startAudioRecording();
+                    // Send initial greeting after session is configured
+                    setTimeout(() => {
+                        if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
+                            // Add a conversation item with the greeting
+                            realtimeWs.send(JSON.stringify({
+                                type: 'conversation.item.create',
+                                item: {
+                                    type: 'message',
+                                    role: 'assistant',
+                                    content: [{
+                                        type: 'text',
+                                        text: 'Hello! I\'m your Pulpoo task management assistant. I\'m here to help you create tasks quickly and efficiently. What would you like to create a task for today?'
+                                    }]
+                                }
+                            }));
+                            
+                            // Trigger the assistant to speak the greeting
+                            realtimeWs.send(JSON.stringify({
+                                type: 'response.create'
+                            }));
+                        }
+                    }, 1000);
                     
-                    updateStatus('Listening...');
-                    updateOrbState('listening');
+                    isConnected = true;
+                    updateStatus('Connected - Agent will greet you...');
+                    updateOrbState('speaking');
                     connectBtn.disabled = true;
                     disconnectBtn.disabled = false;
                     
-                    showInfo('Connected! You can now speak to create tasks.');
+                    showInfo('Voice agent is ready! The assistant will greet you first.');
                 };
                 
-                websocket.onmessage = (event) => {
+                realtimeWs.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
+                        console.log('OpenAI event:', data.type);
                         
-                        switch (data.type) {
-                            case 'connected':
-                                updateStatus('Connected - Listening...');
-                                updateOrbState('listening');
-                                showInfo('Voice agent is ready!');
-                                break;
-                                
-                            case 'audio_received':
-                                updateOrbState('speaking');
-                                updateStatus('Agent processing...');
-                                break;
-                                
-                            case 'response':
-                                updateOrbState('listening');
-                                updateStatus('Listening...');
-                                if (data.message) {
-                                    addTranscript('agent', data.message);
+                        if (data.type === 'session.created') {
+                            console.log('Session created:', data.session.id);
+                        } else if (data.type === 'conversation.item.input_audio_transcription.completed') {
+                            addTranscript('user', data.transcript);
+                        } else if (data.type === 'response.audio.delta') {
+                            updateOrbState('speaking');
+                            updateStatus('Speaking...');
+                            console.log('Received audio delta, length:', data.delta ? data.delta.length : 0);
+                            // Play audio response
+                            if (data.delta) {
+                                const success = playAudioChunk(data.delta);
+                                if (!success) {
+                                    console.error('Failed to play audio chunk');
                                 }
-                                break;
-                                
-                            case 'error':
-                                updateOrbState('idle');
-                                updateStatus('Error occurred');
-                                showError(data.message);
-                                break;
-                                
-                            case 'disconnected':
-                                updateOrbState('idle');
-                                updateStatus('Disconnected');
-                                break;
-                                
-                            default:
-                                console.log('Unknown message type:', data.type);
+                            }
+                        } else if (data.type === 'response.audio.done') {
+                            updateOrbState('listening');
+                            updateStatus('Listening...');
+                            nextPlaybackTime = 0; // Reset for next response
+                            console.log('Audio response completed');
+                        } else if (data.type === 'response.text.delta') {
+                            // Update agent transcript incrementally
+                        } else if (data.type === 'response.text.done') {
+                            addTranscript('agent', data.text);
+                        } else if (data.type === 'error') {
+                            console.error('Realtime API error:', data.error);
+                            showError(data.error.message || 'An error occurred');
                         }
                     } catch (error) {
-                        console.error('Error parsing WebSocket message:', error);
+                        console.error('Error parsing message:', error);
                     }
                 };
                 
-                websocket.onclose = () => {
+                realtimeWs.onerror = (error) => {
+                    console.error('WebSocket error:', error);
+                    showError('Connection error occurred');
+                };
+                
+                realtimeWs.onclose = () => {
+                    console.log('Disconnected from OpenAI Realtime API');
                     isConnected = false;
                     updateStatus('Disconnected');
                     updateOrbState('idle');
                     connectBtn.disabled = false;
                     disconnectBtn.disabled = true;
-                    stopAudioRecording();
-                };
-                
-                websocket.onerror = (error) => {
-                    console.error('WebSocket error:', error);
-                    updateStatus('Connection error');
-                    showError('Failed to connect to voice agent. Make sure the server is running.');
-                    connectBtn.disabled = false;
+                    
+                    if (audioContext) {
+                        audioContext.close();
+                        audioContext = null;
+                    }
+                    if (audioStream) {
+                        audioStream.getTracks().forEach(track => track.stop());
+                        audioStream = null;
+                    }
+                    
+                    // Reset audio playback state
+                    audioQueue = [];
+                    isPlaying = false;
+                    nextPlaybackTime = 0;
                 };
                 
             } catch (error) {
@@ -493,15 +619,26 @@
         }
 
         function disconnect() {
-            if (websocket) {
-                websocket.send(JSON.stringify({
-                    type: 'disconnect'
-                }));
-                websocket.close();
-                websocket = null;
+            if (realtimeWs) {
+                realtimeWs.close();
+                realtimeWs = null;
             }
             
-            stopAudioRecording();
+            if (audioContext) {
+                audioContext.close();
+                audioContext = null;
+            }
+            
+            if (audioStream) {
+                audioStream.getTracks().forEach(track => track.stop());
+                audioStream = null;
+            }
+            
+            // Reset audio playback state
+            audioQueue = [];
+            isPlaying = false;
+            nextPlaybackTime = 0;
+            
             updateStatus('Disconnected');
             updateOrbState('idle');
             connectBtn.disabled = false;
@@ -512,15 +649,6 @@
         connectBtn.addEventListener('click', connect);
         disconnectBtn.addEventListener('click', disconnect);
 
-        // Handle page visibility changes
-        document.addEventListener('visibilitychange', () => {
-            if (document.hidden && isConnected) {
-                updateStatus('Running in background...');
-            } else if (isConnected) {
-                updateStatus('Listening...');
-            }
-        });
-
         // Handle page unload
         window.addEventListener('beforeunload', () => {
             if (isConnected) {
@@ -528,7 +656,7 @@
             }
         });
 
-        // Check if required APIs are available
+        // Check browser support
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             showError('Your browser does not support audio recording. Please use a modern browser.');
             connectBtn.disabled = true;
@@ -536,6 +664,11 @@
 
         if (!window.WebSocket) {
             showError('Your browser does not support WebSockets. Please use a modern browser.');
+            connectBtn.disabled = true;
+        }
+
+        if (!window.AudioContext && !window.webkitAudioContext) {
+            showError('Your browser does not support Web Audio API. Please use a modern browser.');
             connectBtn.disabled = true;
         }
     </script>
