@@ -412,9 +412,6 @@
         let isPlaying = false;
         let nextPlaybackTime = 0;
 
-        // Configuration - get ephemeral key from your server
-        const AUTH_SERVER_URL = 'http://localhost:8082';
-
         function updateOrbState(state) {
             orb.classList.remove('speaking', 'listening', 'connecting');
             if (state === 'speaking') {
@@ -459,37 +456,31 @@
             setTimeout(() => infoDiv.remove(), 5000);
         }
 
-        async function getEphemeralKey() {
-            try {
-                const response = await fetch(`${AUTH_SERVER_URL}/session`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' }
-                });
-                
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-                
-                const data = await response.json();
-                return data.client_secret.value;
-            } catch (error) {
-                console.error('Failed to get ephemeral key:', error);
-                throw new Error(`Failed to get ephemeral key: ${error.message}`);
-            }
-        }
-
         async function setupAudio() {
             try {
-                audioContext = new AudioContext({ sampleRate: 24000 });
+                console.log('Setting up audio...');
+                
+                // Create AudioContext
+                if (!audioContext) {
+                    console.log('Creating new AudioContext');
+                    audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+                }
+                
+                if (!audioContext) {
+                    throw new Error("Failed to create AudioContext");
+                }
                 
                 // Resume audio context if suspended (required by modern browsers)
                 if (audioContext.state === 'suspended') {
+                    console.log('Resuming suspended audio context');
                     await audioContext.resume();
                 }
                 
                 console.log('Audio context state:', audioContext.state);
                 console.log('Audio context sample rate:', audioContext.sampleRate);
                 
+                // Get microphone access
+                console.log('Requesting microphone access...');
                 audioStream = await navigator.mediaDevices.getUserMedia({ 
                     audio: {
                         sampleRate: 24000,
@@ -501,6 +492,11 @@
                     } 
                 });
                 
+                if (!audioStream) {
+                    throw new Error("Failed to get audio stream from microphone");
+                }
+                
+                console.log('Got audio stream, creating media stream source...');
                 microphone = audioContext.createMediaStreamSource(audioStream);
                 
                 // Create audio worklet for processing
@@ -615,110 +611,121 @@
                 updateStatus('Connecting...');
                 updateOrbState('connecting');
                 
-                const ephemeralKey = await getEphemeralKey();
+                // Connect to Deepgram Voice Agent server
+                const PROXY_URL = 'ws://localhost:8084';
                 
-                const url = `wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-10-01`;
-                realtimeWs = new WebSocket(url, ['realtime', `openai-insecure-api-key.${ephemeralKey}`, 'openai-beta.realtime-v1']);
+                console.log('Connecting to local proxy server:', PROXY_URL);
+                realtimeWs = new WebSocket(PROXY_URL);
                 
                 realtimeWs.onopen = async () => {
-                    console.log('Connected to OpenAI Realtime API');
+                    console.log('Connected to proxy server');
                     
-                    // Setup audio
-                    await setupAudio();
-                    
-                    // Send session configuration
-                    realtimeWs.send(JSON.stringify({
-                        type: 'session.update',
-                        session: {
-                            modalities: ['text', 'audio'],
-                            instructions: `You are a professional task management assistant for Pulpoo, helping users create tasks efficiently through voice conversation.
-
-YOUR ROLE:
-- ALWAYS greet the user first when they connect - don't wait for them to speak
-- Capture task information through natural, friendly conversation
-- Ask clarifying questions when details are unclear or missing
-- Confirm all details before creating the task
-- Be concise but thorough
-
-TASK INFORMATION TO COLLECT:
-REQUIRED: Title (clear, descriptive task title)
-OPTIONAL: Description, Deadline (specific date/time), Importance (LOW, MEDIUM, HIGH - defaults to HIGH)
-
-IMPORTANT:
-- All tasks assigned to cuevas@pulpoo.com automatically
-- Default deadline: 24 hours from now
-- Default importance: HIGH
-
-Keep responses natural and conversational. Be professional but approachable.
-
-When the session starts, immediately greet the user with: "Hello! I'm your Pulpoo task management assistant. I'm here to help you create tasks quickly and efficiently. What would you like to create a task for today?"`,
-                            voice: 'alloy',
-                            input_audio_format: 'pcm16',
-                            output_audio_format: 'pcm16',
-                            input_audio_transcription: { model: 'whisper-1' },
-                            turn_detection: {
-                                type: 'server_vad',
-                                threshold: 0.5,
-                                prefix_padding_ms: 300,
-                                silence_duration_ms: 500
-                            },
-                            temperature: 0.8
+                    try {
+                        // Setup audio
+                        await setupAudio();
+                        
+                        // The proxy server will handle session initialization
+                        // We just need to wait for the connection confirmation
+                        
+                        isConnected = true;
+                        updateStatus('Connected! Waiting for agent to greet you...');
+                        updateOrbState('listening');
+                        connectBtn.disabled = true;
+                        disconnectBtn.disabled = false;
+                    } catch (error) {
+                        console.error('Error in onopen handler:', error);
+                        updateStatus('Error: ' + error.message);
+                        updateOrbState('idle');
+                        if (realtimeWs) {
+                            realtimeWs.close();
                         }
-                    }));
-                    
-                    // Trigger initial greeting after session is configured
-                    setTimeout(() => {
-                        if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
-                            // Simply trigger a response - the agent should greet based on instructions
-                            realtimeWs.send(JSON.stringify({
-                                type: 'response.create'
-                            }));
-                        }
-                    }, 1000);
-                    
-                    isConnected = true;
-                    updateStatus('Ready to assist you');
-                    updateOrbState('speaking');
-                    connectBtn.disabled = true;
-                    disconnectBtn.disabled = false;
+                        connectBtn.disabled = false;
+                        disconnectBtn.disabled = true;
+                    }
                 };
                 
                 realtimeWs.onmessage = (event) => {
                     try {
                         const data = JSON.parse(event.data);
-                        console.log('OpenAI event:', data.type);
+                        console.log('Received event:', data.type);
                         
-                        if (data.type === 'session.created') {
-                            console.log('Session created:', data.session.id);
+                        if (data.type === 'session.connected') {
+                            console.log('Session confirmed:', data.message);
+                            updateStatus('Ready to assist you');
+                        } else if (data.type === 'session.created') {
+                            console.log('Session created:', data.session?.id);
                         } else if (data.type === 'conversation.item.input_audio_transcription.completed') {
                             addTranscript('user', data.transcript);
+                            updateOrbState('listening');
                         } else if (data.type === 'conversation.item.input_audio_transcription.failed') {
                             console.error('Audio transcription failed:', data.error);
-                            showError('Audio transcription failed. Please try speaking again.');
+                            // Don't show error to user for every failed transcription
+                            // Only log it for debugging
                         } else if (data.type === 'response.audio.delta') {
                             updateOrbState('speaking');
                             updateStatus('Speaking...');
-                            console.log('Received audio delta, length:', data.delta ? data.delta.length : 0);
                             // Play audio response
                             if (data.delta) {
-                                const success = playAudioChunk(data.delta);
-                                if (!success) {
-                                    console.error('Failed to play audio chunk');
-                                }
+                                playAudioChunk(data.delta);
                             }
                         } else if (data.type === 'response.audio.done') {
                             updateOrbState('listening');
                             updateStatus('Listening...');
                             nextPlaybackTime = 0; // Reset for next response
-                            console.log('Response completed:', data);
-                        } else if (data.type === 'response.text.delta') {
-                            // Update agent transcript incrementally
                         } else if (data.type === 'response.text.done') {
                             console.log('Text response received:', data.text);
                             addTranscript('agent', data.text);
+                        } else if (data.type === 'AgentStartedSpeaking') {
+                            updateOrbState('speaking');
+                            updateStatus('Speaking...');
+                            // Since Deepgram Voice Agent handles audio internally,
+                            // we just show the speaking state
+                        } else if (data.type === 'AgentStoppedSpeaking') {
+                            updateOrbState('listening');
+                            updateStatus('Listening...');
+                            nextPlaybackTime = 0; // Reset for next response
+                        } else if (data.type === 'AgentThinking') {
+                            updateStatus('Thinking...');
+                        } else if (data.type === 'UserStartedSpeaking') {
+                            updateOrbState('listening');
+                            updateStatus('Listening to you...');
+                        } else if (data.type === 'UserStoppedSpeaking') {
+                            updateStatus('Processing...');
+                        } else if (data.type === 'response.text') {
+                            // Handle text responses from the agent
+                            console.log('Text response received:', data.text);
+                            addTranscript('agent', data.text);
+                        } else if (data.type === 'response.audio.start') {
+                            updateOrbState('speaking');
+                            updateStatus('Speaking...');
+                            console.log('Audio response starting:', data.text);
+                        } else if (data.type === 'response.audio.delta') {
+                            // Play audio chunk if provided
+                            if (data.delta) {
+                                playAudioChunk(data.delta);
+                            }
+                        } else if (data.type === 'response.audio.done') {
+                            updateOrbState('listening');
+                            updateStatus('Listening...');
+                            nextPlaybackTime = 0; // Reset for next response
                         } else if (data.type === 'error') {
                             console.error('Realtime API error:', data.error);
-                            showError(data.error.message || 'An error occurred');
+                            
+                            // Handle rate limit errors gracefully
+                            if (data.error?.message?.includes('429') || 
+                                data.error?.message?.includes('rate limit')) {
+                                showInfo('The agent is processing... please wait a moment.');
+                            } else {
+                                showError(data.error?.message || 'An error occurred');
+                            }
+                        } else if (data.type === 'input_audio_buffer.speech_started') {
+                            updateOrbState('listening');
+                            updateStatus('Listening to you...');
+                        } else if (data.type === 'input_audio_buffer.speech_stopped') {
+                            updateStatus('Processing...');
+                        } else if (data.type === 'response.audio_transcript.delta') {
+                            // Agent is speaking - show what it's saying
+                            updateOrbState('speaking');
                         }
                     } catch (error) {
                         console.error('Error parsing message:', error);
@@ -727,11 +734,11 @@ When the session starts, immediately greet the user with: "Hello! I'm your Pulpo
                 
                 realtimeWs.onerror = (error) => {
                     console.error('WebSocket error:', error);
-                    showError('Connection error occurred');
+                    showError('Connection error occurred. Please try again.');
                 };
                 
                 realtimeWs.onclose = (event) => {
-                    console.log('Disconnected from OpenAI Realtime API', event.code, event.reason);
+                    console.log('Disconnected from proxy server', event.code, event.reason);
                     isConnected = false;
                     updateStatus('Disconnected');
                     updateOrbState('idle');
@@ -753,7 +760,7 @@ When the session starts, immediately greet the user with: "Hello! I'm your Pulpo
                     nextPlaybackTime = 0;
                     
                     // Show error if not a clean disconnect
-                    if (event.code !== 1000) {
+                    if (event.code !== 1000 && event.code !== 1005) {
                         showError(`Connection lost (${event.code}): ${event.reason || 'Unknown reason'}`);
                     }
                 };
