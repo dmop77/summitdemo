@@ -1,71 +1,48 @@
-# Pulpoo Voice Agent - OpenAI Realtime API
+# Pulpoo Voice Agent
 
 Voice agent that creates tasks in Pulpoo using OpenAI Realtime API with speech-to-speech architecture.
 
-## Features
+## Overview
 
-- **Speech-to-Speech Architecture**: Direct audio processing using OpenAI's Realtime API
-- **Natural Conversation**: Handles voice input and responds with natural speech
+- **Speech-to-Speech**: Direct audio processing using OpenAI's Realtime API
 - **Task Creation**: Creates tasks in Pulpoo through conversational interface
-- **Real-time Communication**: WebSocket-based real-time audio streaming
-- **Modern Web Interface**: Beautiful, responsive web UI with visual feedback
+- **Real-time Communication**: WebSocket-based audio streaming
+- **Web Interface**: Modern UI for voice interaction
 
-## Architecture
+## Quick Start
 
-This implementation uses OpenAI's Realtime API with the speech-to-speech architecture:
+```bash
+# 1. Setup environment
+cd agent
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-- **Audio Input**: Captures user speech through browser microphone
-- **Real-time Processing**: Streams audio to OpenAI Realtime API
-- **Natural Responses**: Agent responds with natural speech output
-- **Task Integration**: Creates tasks in Pulpoo via API calls
+# 2. Configure API keys
+echo "OPENAI_API_KEY=sk-your-openai-key" > .env
+echo "PULPOO_API_KEY=your-pulpoo-key" >> .env
 
-## Components
+# 3. Start system
+cd ..
+./start.sh
 
-The system consists of these core components:
+# 4. Open web interface
+open server/index.html
+```
 
-1. **Voice Agent** (`agent/voice_agent.py`) - Core agent using OpenAI Realtime API
-2. **WebSocket Server** (`agent/realtime_server.py`) - Real-time communication handler
-3. **Authentication Server** (`agent/auth_server.py`) - Token-based authentication
-4. **Web Interface** (`server/index.html`) - Modern web UI for voice interaction
-5. **Startup Script** (`start.sh`) - Automated service orchestration
+## Requirements
 
-## Setup
-
-1. **Install dependencies:**
-   ```bash
-   cd agent
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install -r requirements.txt
-   ```
-
-2. **Configure API keys:**
-   ```bash
-   cp agent/.env.template agent/.env
-   # Edit agent/.env with your actual API keys
-   ```
-
-3. **Run the complete system:**
-   ```bash
-   ./start.sh
-   ```
-
-4. **Open web interface:**
-   ```bash
-   open server/index.html
-   # Or visit: http://localhost:8082
-   ```
-
-## Usage
-
-1. **Start the system** using `./start.sh`
-2. **Open the web interface** in your browser
-3. **Click "Connect"** to start the voice agent
-4. **Allow microphone access** when prompted
-5. **Speak naturally** to create tasks:
-   - "Create a task to review the Q4 report by Friday"
-   - "I need to schedule a meeting with the team"
-   - "Add a high priority task to update the website"
+```bash
+openai>=1.50.0
+python-dotenv>=1.0.0
+aiohttp>=3.9.0
+pydantic>=2.0.0
+flask>=3.0.0
+flask-cors>=4.0.0
+pytz>=2023.3
+websockets>=12.0
+requests>=2.31.0
+```
 
 ## API Keys Required
 
@@ -74,11 +51,16 @@ The system consists of these core components:
 
 ## Services
 
-The system runs these services:
+- **Authentication Server** (Port 8082): Token generation and validation
+- **Web Interface**: http://localhost:8080
 
-- **Authentication Server** (Port 8082): Handles token generation and validation
-- **WebSocket Server** (Port 8081): Manages real-time communication with OpenAI Realtime API
-- **Web Interface**: Provides the user interface for voice interaction
+## Usage
+
+1. Start system: `./start.sh`
+2. Open web interface in browser
+3. Click "Connect" to start voice agent
+4. Allow microphone access
+5. Speak to create tasks
 
 ## Task Assignment
 
