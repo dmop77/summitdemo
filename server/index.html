@@ -608,9 +608,9 @@
             try {
                 updateStatus('Connecting...');
                 updateOrbState('connecting');
-                
-                // Connect to Deepgram Voice Agent server
-                const PROXY_URL = 'ws://localhost:8084';
+
+                // Connect to Voice Agent server WebSocket
+                const PROXY_URL = 'ws://localhost:8084/ws';
                 
                 console.log('Connecting to local proxy server:', PROXY_URL);
                 realtimeWs = new WebSocket(PROXY_URL);

@@ -1,12 +1,23 @@
-deepgram-sdk>=3.8.0
+# Core Framework
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+pydantic-ai>=0.0.1
+
+# API Client
 openai>=1.50.0
-python-dotenv>=1.0.0
+deepgram-sdk>=3.8.0
+
+# Web Server
 aiohttp>=3.9.0
-pydantic>=2.0.0
-flask>=3.0.0
-flask-cors>=4.0.0
-pytz>=2023.3
-websockets>=12.0
-requests>=2.31.0
-sounddevice>=0.4.6
-numpy>=1.26.0
+
+# Environment
+python-dotenv>=1.0.0
+
+# Optional: Cartesia for TTS (uncomment if needed)
+# cartesia>=1.0.0
+
+# Development & Testing
+pytest>=7.4.3
+pytest-asyncio>=0.23.1
+black>=23.12.0
+ruff>=0.1.0
