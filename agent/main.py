@@ -225,16 +225,19 @@ class VoiceServer:
         """
         try:
             session_id = f"session_{id(ws)}"
-            greeting_prompt = f"Greet {user_name} warmly and ask how you can help them with their Pulpoo needs."
 
-            # Generate greeting from agent
+            # Use a simple trigger message to get the agent to greet naturally
+            # The system prompt already instructs the agent to greet the user by name
+            greeting_trigger = "start"
+
+            # Generate greeting from agent (agent will greet based on system prompt)
             greeting_response = await self.voice_assistant.process_message(
-                greeting_prompt, session_id
+                greeting_trigger, session_id
             )
 
             logger.info(f"Sending greeting: {greeting_response}")
 
-            # Send greeting text
+            # Send greeting text to transcript
             await ws.send_json({
                 "type": "response.text",
                 "text": greeting_response,
@@ -246,6 +249,10 @@ class VoiceServer:
                 await ws.send_json({
                     "type": "response.audio.delta",
                     "delta": audio_data,
+                })
+                # Send audio completion event
+                await ws.send_json({
+                    "type": "response.audio.done",
                 })
             else:
                 logger.warning("Failed to synthesize greeting audio")
@@ -264,12 +271,23 @@ class VoiceServer:
         session_id = f"session_{id(ws)}"
         logger.info(f"New WebSocket connection: {session_id}")
 
-        current_transcript = ""
         greeting_sent = False
+
+        # Audio accumulation for complete utterances
+        audio_buffer = []
+        silence_chunks = 0
+        SILENCE_THRESHOLD = 3  # Number of silent chunks (~1.5 seconds) - balanced for accuracy and latency
+        MIN_SPEECH_CHUNKS = 1  # Minimum speech chunks before considering it a valid utterance
+        accumulated_transcript = ""
+        speech_chunk_count = 0
+        is_agent_speaking = False  # Track when agent is responding to avoid processing user audio
 
         try:
             # Initialize voice assistant
             await self.voice_assistant.initialize()
+
+            # Reset conversation history for this new session
+            self.voice_assistant.reset_conversation()
 
             # Connect to Deepgram for STT
             dg_client = DeepgramClient(api_key=self.config.deepgram_api_key)
@@ -294,11 +312,18 @@ class VoiceServer:
                     if data.get("type") == "input_audio_buffer.append":
                         audio_b64 = data.get("audio", "")
                         if audio_b64:
+                            # Skip processing if agent is currently speaking
+                            if is_agent_speaking:
+                                logger.debug("Agent is speaking, skipping user audio")
+                                continue
+
                             # Decode base64 to get raw PCM16 bytes
                             raw_audio_bytes = base64.b64decode(audio_b64)
 
-                            # Wrap raw PCM16 audio in WAV format for Deepgram
-                            # Browser sends PCM16 at 24000 Hz, mono
+                            # Add to buffer for accumulation
+                            audio_buffer.append(raw_audio_bytes)
+
+                            # Wrap raw PCM16 audio in WAV format for Deepgram (for VAD check)
                             wav_audio = self._create_wav_header(
                                 raw_audio_bytes,
                                 sample_rate=24000,
@@ -306,7 +331,7 @@ class VoiceServer:
                                 sample_width=2
                             )
 
-                            # Send to Deepgram for transcription
+                            # Send to Deepgram just to check for speech activity (VAD)
                             try:
                                 response = dg_client.listen.v1.media.transcribe_file(
                                     request=wav_audio,
@@ -315,28 +340,78 @@ class VoiceServer:
                                     punctuate=True,
                                 )
 
-                                # Extract transcript from Deepgram response
-                                transcript = ""
-                                if response and response.results:
+                                # Check if this chunk has speech (just for VAD, don't use transcript)
+                                has_speech = False
+                                if response and hasattr(response, 'results') and response.results:
                                     channels = response.results.channels
                                     if channels and len(channels) > 0:
                                         alternatives = channels[0].alternatives
                                         if alternatives and len(alternatives) > 0:
                                             transcript = alternatives[0].transcript or ""
+                                            confidence = alternatives[0].confidence if hasattr(alternatives[0], 'confidence') else 0.0
+                                            if transcript and transcript.strip() and confidence > 0.3:
+                                                has_speech = True
+                                                logger.debug(f"Speech detected in chunk (confidence: {confidence:.2f})")
 
-                                    # Only process if we have a non-empty transcript
-                                    if transcript and transcript.strip():
-                                        logger.info(f"Transcript: {transcript}")
+                                if has_speech:
+                                    # Speech detected
+                                    speech_chunk_count += 1
+                                    silence_chunks = 0
+                                else:
+                                    # Silence detected
+                                    silence_chunks += 1
+                                    logger.debug(f"Silence chunk {silence_chunks}/{SILENCE_THRESHOLD}")
+
+                                # Process when silence threshold reached AND we have enough speech
+                                if (silence_chunks >= SILENCE_THRESHOLD and
+                                    len(audio_buffer) > MIN_SPEECH_CHUNKS and
+                                    speech_chunk_count >= MIN_SPEECH_CHUNKS):
+
+                                    # Concatenate all accumulated audio
+                                    complete_audio = b''.join(audio_buffer)
+
+                                    # Create WAV file from complete audio
+                                    complete_wav = self._create_wav_header(
+                                        complete_audio,
+                                        sample_rate=24000,
+                                        channels=1,
+                                        sample_width=2
+                                    )
+
+                                    logger.info(f"Processing complete utterance: {len(complete_audio)} bytes, {speech_chunk_count} speech chunks")
+
+                                    # Send complete audio to Deepgram for transcription
+                                    final_response = dg_client.listen.v1.media.transcribe_file(
+                                        request=complete_wav,
+                                        model=self.config.deepgram_model,
+                                        language="en",
+                                        punctuate=True,
+                                    )
+
+                                    # Extract final transcript
+                                    final_transcript = ""
+                                    if final_response and hasattr(final_response, 'results') and final_response.results:
+                                        channels = final_response.results.channels
+                                        if channels and len(channels) > 0:
+                                            alternatives = channels[0].alternatives
+                                            if alternatives and len(alternatives) > 0:
+                                                final_transcript = alternatives[0].transcript or ""
+
+                                    if final_transcript and final_transcript.strip():
+                                        logger.info(f"Complete utterance transcribed: {final_transcript}")
+
+                                        # Set agent speaking flag
+                                        is_agent_speaking = True
 
                                         # Send transcript to client
                                         await ws.send_json({
                                             "type": "user.transcript",
-                                            "text": transcript,
+                                            "text": final_transcript,
                                         })
 
                                         # Get agent response
                                         response_text = await self.voice_assistant.process_message(
-                                            transcript, session_id
+                                            final_transcript, session_id
                                         )
 
                                         logger.info(f"Agent will respond: {response_text[:100]}")
@@ -355,15 +430,112 @@ class VoiceServer:
                                                 "type": "response.audio.delta",
                                                 "delta": audio_data,
                                             })
+                                            # Send audio completion event
+                                            await ws.send_json({
+                                                "type": "response.audio.done",
+                                            })
                                         else:
                                             logger.warning("Failed to synthesize audio response")
 
+                                    # Reset accumulation
+                                    audio_buffer = []
+                                    silence_chunks = 0
+                                    speech_chunk_count = 0
+                                    is_agent_speaking = False
+
                             except Exception as e:
-                                logger.error(f"Error transcribing audio: {e}")
-                                await ws.send_json({
-                                    "type": "error",
-                                    "message": f"Transcription error: {str(e)}",
-                                })
+                                # Check if it's a timeout error (408) - these are common and can be ignored
+                                error_msg = str(e)
+                                if "408" in error_msg or "timeout" in error_msg.lower():
+                                    logger.debug(f"Deepgram timeout (silence): {e}")
+                                    # Treat timeout as silence
+                                    silence_chunks += 1
+                                    logger.debug(f"Timeout = silence chunk {silence_chunks}/{SILENCE_THRESHOLD}")
+
+                                    # Process if we have accumulated audio and reached threshold
+                                    if (silence_chunks >= SILENCE_THRESHOLD and
+                                        len(audio_buffer) > MIN_SPEECH_CHUNKS and
+                                        speech_chunk_count >= MIN_SPEECH_CHUNKS):
+
+                                        # Concatenate all accumulated audio
+                                        complete_audio = b''.join(audio_buffer)
+
+                                        # Create WAV file from complete audio
+                                        complete_wav = self._create_wav_header(
+                                            complete_audio,
+                                            sample_rate=24000,
+                                            channels=1,
+                                            sample_width=2
+                                        )
+
+                                        logger.info(f"Processing complete utterance (after timeout): {len(complete_audio)} bytes")
+
+                                        try:
+                                            # Send complete audio to Deepgram for transcription
+                                            final_response = dg_client.listen.v1.media.transcribe_file(
+                                                request=complete_wav,
+                                                model=self.config.deepgram_model,
+                                                language="en",
+                                                punctuate=True,
+                                            )
+
+                                            # Extract final transcript
+                                            final_transcript = ""
+                                            if final_response and hasattr(final_response, 'results') and final_response.results:
+                                                channels = final_response.results.channels
+                                                if channels and len(channels) > 0:
+                                                    alternatives = channels[0].alternatives
+                                                    if alternatives and len(alternatives) > 0:
+                                                        final_transcript = alternatives[0].transcript or ""
+
+                                            if final_transcript and final_transcript.strip():
+                                                logger.info(f"Complete utterance transcribed: {final_transcript}")
+
+                                                is_agent_speaking = True
+
+                                                await ws.send_json({
+                                                    "type": "user.transcript",
+                                                    "text": final_transcript,
+                                                })
+
+                                                response_text = await self.voice_assistant.process_message(
+                                                    final_transcript, session_id
+                                                )
+
+                                                logger.info(f"Agent will respond: {response_text[:100]}")
+
+                                                await ws.send_json({
+                                                    "type": "response.text",
+                                                    "text": response_text,
+                                                })
+
+                                                audio_data = await self._synthesize_speech(response_text)
+                                                if audio_data:
+                                                    logger.info(f"Sending audio response: {len(audio_data)} chars")
+                                                    await ws.send_json({
+                                                        "type": "response.audio.delta",
+                                                        "delta": audio_data,
+                                                    })
+                                                    await ws.send_json({
+                                                        "type": "response.audio.done",
+                                                    })
+
+                                            # Reset
+                                            audio_buffer = []
+                                            silence_chunks = 0
+                                            speech_chunk_count = 0
+                                            is_agent_speaking = False
+
+                                        except Exception as transcribe_error:
+                                            logger.error(f"Error transcribing complete audio: {transcribe_error}")
+                                            audio_buffer = []
+                                            silence_chunks = 0
+                                            speech_chunk_count = 0
+                                            is_agent_speaking = False
+
+                                else:
+                                    logger.error(f"Error in VAD check: {e}")
+                                    # Don't reset buffers on non-timeout errors, continue accumulating
 
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     logger.error(f"WebSocket error: {ws.exception()}")

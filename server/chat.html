@@ -390,7 +390,8 @@
             <button id="disconnectBtn" disabled>Disconnect</button>
         </div>
 
-        <div class="transcript-box" id="transcriptBox" style="display: none;">
+        <div class="transcript-box" id="transcriptBox">
+            <h3 style="margin-bottom: 1rem; color: #1e293b; font-size: 1.1rem;">Conversation Transcript</h3>
             <div id="transcript"></div>
         </div>
     </div>
@@ -428,7 +429,6 @@
         }
 
         function addTranscript(type, text) {
-            transcriptBox.style.display = 'block';
             const item = document.createElement('div');
             item.className = 'transcript-item';
             const label = document.createElement('span');
@@ -509,21 +509,22 @@
                     class AudioProcessor extends AudioWorkletProcessor {
                         constructor() {
                             super();
-                            this.bufferSize = 4096;
+                            // Increase buffer to ~500ms for better transcription
+                            this.bufferSize = 12000;  // 500ms at 24kHz
                             this.buffer = new Float32Array(this.bufferSize);
                             this.bufferIndex = 0;
                         }
-                        
+
                         process(inputs, outputs, parameters) {
                             const input = inputs[0];
                             if (input && input.length > 0) {
                                 const channelData = input[0];
-                                
+
                                 // Accumulate audio data
                                 for (let i = 0; i < channelData.length; i++) {
                                     this.buffer[this.bufferIndex] = channelData[i];
                                     this.bufferIndex++;
-                                    
+
                                     // Send buffer when full
                                     if (this.bufferIndex >= this.bufferSize) {
                                         const pcm16 = new Int16Array(this.bufferSize);
@@ -713,53 +714,22 @@
                             updateStatus('Ready to assist you');
                         } else if (data.type === 'session.created') {
                             console.log('Session created:', data.session?.id);
-                        } else if (data.type === 'conversation.item.input_audio_transcription.completed') {
-                            addTranscript('user', data.transcript);
+                        } else if (data.type === 'user.transcript') {
+                            // User's transcribed speech
+                            console.log('User transcript:', data.text);
+                            addTranscript('user', data.text);
                             updateOrbState('listening');
-                        } else if (data.type === 'conversation.item.input_audio_transcription.failed') {
-                            console.error('Audio transcription failed:', data.error);
-                            // Don't show error to user for every failed transcription
-                            // Only log it for debugging
-                        } else if (data.type === 'response.audio.delta') {
-                            updateOrbState('speaking');
-                            updateStatus('Speaking...');
-                            // Play audio response
-                        if (data.delta) {
-                                playAudioChunk(data.delta, data.mime);
-                            }
-                        } else if (data.type === 'response.audio.done') {
-                            updateOrbState('listening');
-                            updateStatus('Listening...');
-                            nextPlaybackTime = 0; // Reset for next response
-                        } else if (data.type === 'response.text.done') {
-                            console.log('Text response received:', data.text);
-                            addTranscript('agent', data.text);
-                        } else if (data.type === 'AgentStartedSpeaking') {
-                            updateOrbState('speaking');
-                            updateStatus('Speaking...');
-                            // Since Deepgram Voice Agent handles audio internally,
-                            // we just show the speaking state
-                        } else if (data.type === 'AgentStoppedSpeaking') {
-                            updateOrbState('listening');
-                            updateStatus('Listening...');
-                            nextPlaybackTime = 0; // Reset for next response
-                        } else if (data.type === 'AgentThinking') {
-                            updateStatus('Thinking...');
-                        } else if (data.type === 'UserStartedSpeaking') {
-                            updateOrbState('listening');
-                            updateStatus('Listening to you...');
-                        } else if (data.type === 'UserStoppedSpeaking') {
                             updateStatus('Processing...');
                         } else if (data.type === 'response.text') {
-                            // Handle text responses from the agent
-                            console.log('Text response received:', data.text);
+                            // Agent's text response
+                            console.log('Agent response:', data.text);
                             addTranscript('agent', data.text);
-                        } else if (data.type === 'response.audio.start') {
                             updateOrbState('speaking');
                             updateStatus('Speaking...');
-                            console.log('Audio response starting:', data.text);
                         } else if (data.type === 'response.audio.delta') {
-                            // Play audio chunk if provided
+                            // Agent's audio response
+                            updateOrbState('speaking');
+                            updateStatus('Speaking...');
                             if (data.delta) {
                                 playAudioChunk(data.delta, data.mime);
                             }
@@ -768,23 +738,13 @@
                             updateStatus('Listening...');
                             nextPlaybackTime = 0; // Reset for next response
                         } else if (data.type === 'error') {
-                            console.error('Realtime API error:', data.error);
-                            
-                            // Handle rate limit errors gracefully
-                            if (data.error?.message?.includes('429') || 
-                                data.error?.message?.includes('rate limit')) {
-                                showInfo('The agent is processing... please wait a moment.');
-                            } else {
-                                showError(data.error?.message || 'An error occurred');
-                            }
+                            console.error('Error:', data.message || data.error);
+                            showError(data.message || 'An error occurred');
                         } else if (data.type === 'input_audio_buffer.speech_started') {
                             updateOrbState('listening');
                             updateStatus('Listening to you...');
                         } else if (data.type === 'input_audio_buffer.speech_stopped') {
                             updateStatus('Processing...');
-                        } else if (data.type === 'response.audio_transcript.delta') {
-                            // Agent is speaking - show what it's saying
-                            updateOrbState('speaking');
                         }
                     } catch (error) {
                         console.error('Error parsing message:', error);

@@ -72,26 +72,31 @@ class AgentTools:
 
     async def create_appointment(
         self,
-        user_name: str,
-        user_email: str,
         topic: str,
         preferred_date: Optional[str] = None,
-        duration_minutes: int = 30,
+        user_name: Optional[str] = None,
+        user_email: Optional[str] = None,
     ) -> dict:
         """
         Create an appointment in Pulpoo.
 
         Args:
-            user_name: Customer's name
-            user_email: Customer's email
-            topic: Appointment topic/subject
+            topic: Appointment topic/subject (required)
             preferred_date: Preferred date/time as ISO format string (e.g., "2025-11-15T14:30:00") or natural language (e.g., "next Monday at 2 PM")
-            duration_minutes: Duration of appointment in minutes (default 30)
+            user_name: Customer's name (will be provided by agent context - do not ask user)
+            user_email: Customer's email (will be provided by agent context - do not ask user)
 
         Returns:
             Dictionary with appointment details
         """
         try:
+            # Use provided values or get from agent context
+            # In real usage, the agent will have these from ConversationContext
+            if not user_name:
+                user_name = "User"  # Fallback
+            if not user_email:
+                user_email = "user@example.com"  # Fallback
+
             logger.info(f"Tool: Creating appointment for {user_email} - Topic: {topic}")
 
             if not self.pulpoo_api_key:

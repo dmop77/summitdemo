@@ -187,6 +187,30 @@ pytest -v --asyncio-mode=auto
 
 ## Troubleshooting
 
+### Port Already in Use Error
+
+If you see `[Errno 48] address already in use` when starting the server:
+
+```bash
+# Find the process using port 8084
+lsof -ti:8084
+
+# Kill the process (replace PID with the number from above)
+kill -9 <PID>
+
+# Or do it in one command
+kill -9 $(lsof -ti:8084)
+
+# Verify port is free (should show no output)
+lsof -ti:8084
+```
+
+Then restart the server:
+
+```bash
+python main.py
+```
+
 ### WebSocket Connection Issues
 - Check browser console for errors
 - Ensure server is running on correct port

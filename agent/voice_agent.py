@@ -16,6 +16,7 @@ from typing import Optional
 import aiohttp
 from pydantic_ai import Agent, ModelSettings
 from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart
 
 from config import get_voice_config, get_agent_config
 from schemas import VoiceAgentMessage, ConversationContext, UserInfo
@@ -40,6 +41,7 @@ class VoiceAssistant:
         self.agent = None  # Will be created with context-aware prompt
         self.conversation_context: Optional[ConversationContext] = None
         self.dynamic_system_prompt: Optional[str] = None
+        self.message_history: list[ModelMessage] = []  # Track Pydantic AI message history
 
     def _create_agent(self, system_prompt: Optional[str] = None) -> Agent:
         """
@@ -84,6 +86,13 @@ class VoiceAssistant:
             await self.http_session.close()
         logger.info("Voice Assistant cleaned up")
 
+    def reset_conversation(self):
+        """Reset conversation history for a fresh session."""
+        self.message_history = []
+        if self.conversation_context:
+            self.conversation_context.conversation_history = []
+        logger.info("Conversation history reset")
+
     async def process_message(self, user_input: str, session_id: str) -> str:
         """
         Process a user message and return agent response.
@@ -111,12 +120,15 @@ class VoiceAssistant:
 
             logger.info(f"User message: {user_input}")
 
-            # Get agent response (agent has context from system prompt)
-            response = await self.agent.run(user_input)
+            # Get agent response with conversation history
+            response = await self.agent.run(user_input, message_history=self.message_history)
 
             # Extract text from response - Pydantic AI v2 uses response.output
             response_text = str(response.output) if hasattr(response, 'output') else str(response)
             logger.info(f"Agent response: {response_text}")
+
+            # Update message history with the new exchange
+            self.message_history = response.new_messages()
 
             # Add agent message to history
             agent_msg = VoiceAgentMessage(
@@ -158,6 +170,7 @@ class VoiceAssistant:
         self.dynamic_system_prompt = self.agent_config.build_dynamic_prompt(
             self.agent_config.system_prompt,
             user_name=name,
+            user_email=email,
             website_info=website_info
         )
 
@@ -185,6 +198,7 @@ class VoiceAssistant:
             self.dynamic_system_prompt = self.agent_config.build_dynamic_prompt(
                 self.agent_config.system_prompt,
                 user_name=self.conversation_context.user_info.name,
+                user_email=self.conversation_context.user_info.email,
                 website_info=website_info
             )
 
