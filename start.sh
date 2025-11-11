@@ -6,8 +6,8 @@
 
 set -e  # Exit on any error
 
-echo "🎤 Task Voice Agent Setup - Deepgram STT/TTS + OpenAI Processing"
-echo "=================================================================="
+echo "🎤 Pulpoo Voice Agent - Simple & Reliable"
+echo "=========================================="
 
 # Colors for output
 RED='\033[0;31m'
@@ -55,16 +55,16 @@ if [ ! -f "agent/.env" ]; then
 fi
 
 # Check if API keys are set
-if ! grep -q "cwz" agent/.env || ! grep -q "DEEPGRAM_API_KEY=" agent/.env || ! grep -q "OPENAI_API_KEY=" agent/.env; then
+if ! grep -q "DEEPGRAM_API_KEY=" agent/.env || ! grep -q "OPENAI_API_KEY=" agent/.env || ! grep -q "PULPOO_API_KEY=" agent/.env; then
     print_warning "API keys not configured in agent/.env"
     print_status "Please edit agent/.env and add your actual API keys:"
     print_status "  - DEEPGRAM_API_KEY: Your Deepgram API key (for STT & TTS)"
-    print_status "  - OPENAI_API_KEY: Your OpenAI API key (for LLM processing)"
-    print_status "  - PULPOO_API_KEY: Your Pulpoo API key"
+    print_status "  - OPENAI_API_KEY: Your OpenAI API key (starts with sk-)"
+    print_status "  - PULPOO_API_KEY: Your Pulpoo API key (starts with cwz-)"
     print_status ""
     print_status "Example agent/.env file:"
     print_status "  DEEPGRAM_API_KEY=your-deepgram-key"
-    print_status "  OPENAI_API_KEY=your-openai-key"
+    print_status "  OPENAI_API_KEY=sk-your-openai-key"
     print_status "  PULPOO_API_KEY=cwz-your-pulpoo-key"
     exit 1
 fi
@@ -116,8 +116,8 @@ print_status "Starting services..."
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
-# Start Flux voice server
-print_status "Starting Flux voice server on port 8084..."
+# Start voice server
+print_status "Starting voice agent server on port 8084..."
 cd agent
 source venv/bin/activate
 python voice_server.py > ../logs/voice_server.log 2>&1 &
@@ -158,21 +158,18 @@ echo "   3. Allow microphone access when prompted"
 echo "   4. Speak naturally to create tasks in Pulpoo"
 echo ""
 echo "💡 Technology Stack:"
-echo "   ✓ Flux Voice Agent Pattern (Modular Pipeline)"
-echo "   ✓ Deepgram Flux STT (Speech-to-Text + Turn Detection)"
-echo "   ✓ OpenAI GPT-4o (LLM Processing + Function Calling)"
-echo "   ✓ Deepgram Aura TTS (Text-to-Speech)"
-echo "   ✓ Real-time audio streaming"
-echo "   ✓ Advanced turn detection with EndOfTurn events"
-echo "   ✓ Interruption handling (barge-in)"
+echo "   ✓ Deepgram Nova-2 Streaming STT (Speech-to-Text)"
+echo "   ✓ OpenAI GPT-4 (Conversation Processing + Function Calling)"
+echo "   ✓ Deepgram Aura TTS (Natural Voice Responses)"
+echo "   ✓ Pulpoo API (Task Creation)"
+echo "   ✓ Real-time WebSocket audio streaming"
+echo "   ✓ Beautiful animated UI"
 echo ""
 echo "🐛 Troubleshooting:"
-echo "   • Check logs/ directory for error messages"
-echo "   • Verify API keys in agent/.env:"
-echo "     - DEEPGRAM_API_KEY (for STT & TTS)"
-echo "     - OPENAI_API_KEY (for LLM processing)"
-echo "     - PULPOO_API_KEY (for task creation)"
+echo "   • Check logs/voice_server.log for error messages"
+echo "   • Verify API keys in agent/.env are correct"
 echo "   • Ensure port 8084 is available"
+echo "   • Test API connection: python agent/test_pulpoo_connection.py"
 echo ""
 echo "═══════════════════════════════════════════════════════════════"
 print_status "Press Ctrl+C to stop all services"

@@ -566,7 +566,7 @@
             return JSON.stringify(obj);
         }
 
-        function playAudioChunk(base64Audio) {
+        function playAudioChunk(base64Audio, mimeType = 'audio/mpeg') {
             try {
                 console.log('Playing audio chunk, base64 length:', base64Audio.length);
                 
@@ -580,8 +580,8 @@
                 
                 console.log('Audio data size:', bytes.length, 'bytes');
                 
-                // Create blob from audio data (Deepgram returns complete audio file)
-                const blob = new Blob([bytes], { type: 'audio/mpeg' });
+                // Create blob from audio data using provided MIME type
+                const blob = new Blob([bytes], { type: mimeType || 'audio/mpeg' });
                 const audioUrl = URL.createObjectURL(blob);
                 
                 // Create and play audio element
@@ -663,8 +663,8 @@
                             updateOrbState('speaking');
                             updateStatus('Speaking...');
                             // Play audio response
-                            if (data.delta) {
-                                playAudioChunk(data.delta);
+                        if (data.delta) {
+                                playAudioChunk(data.delta, data.mime);
                             }
                         } else if (data.type === 'response.audio.done') {
                             updateOrbState('listening');
@@ -700,7 +700,7 @@
                         } else if (data.type === 'response.audio.delta') {
                             // Play audio chunk if provided
                             if (data.delta) {
-                                playAudioChunk(data.delta);
+                                playAudioChunk(data.delta, data.mime);
                             }
                         } else if (data.type === 'response.audio.done') {
                             updateOrbState('listening');
