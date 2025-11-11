@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pulpoo Voice Assistant - Setup</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #ffffff 0%, #f8fafc 50%, #f1f5f9 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            position: relative;
+            padding: 20px;
+        }
+
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: radial-gradient(circle at 20% 80%, rgba(139, 92, 246, 0.05) 0%, transparent 50%),
+                        radial-gradient(circle at 80% 20%, rgba(168, 85, 247, 0.05) 0%, transparent 50%),
+                        radial-gradient(circle at 40% 40%, rgba(236, 72, 153, 0.03) 0%, transparent 50%);
+            pointer-events: none;
+        }
+
+        .container {
+            background: white;
+            border-radius: 30px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.1);
+            max-width: 600px;
+            width: 100%;
+            padding: 60px 40px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .logo-container {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.5rem;
+            gap: 1rem;
+        }
+
+        .logo {
+            width: 70px;
+            height: 70px;
+            background: white;
+            border-radius: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 8px 32px rgba(139, 92, 246, 0.2);
+            overflow: hidden;
+        }
+
+        .logo img {
+            width: 100%;
+            height: 100%;
+            object-fit: contain;
+            padding: 8px;
+        }
+
+        .brand-text {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .brand-name {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #1e293b;
+            margin-bottom: 0.25rem;
+        }
+
+        .tagline {
+            font-size: 0.9rem;
+            color: #64748b;
+            font-weight: 500;
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            margin-bottom: 0.5rem;
+            font-weight: 600;
+            color: #1e293b;
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            margin-bottom: 2.5rem;
+            color: #64748b;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            font-weight: 600;
+            color: #1e293b;
+            margin-bottom: 0.75rem;
+            font-size: 0.95rem;
+        }
+
+        input {
+            width: 100%;
+            padding: 0.875rem 1.25rem;
+            border: 2px solid rgba(139, 92, 246, 0.2);
+            border-radius: 12px;
+            font-size: 1rem;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            background: #f8fafc;
+            font-family: inherit;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: rgba(139, 92, 246, 0.6);
+            background: white;
+            box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.1);
+        }
+
+        input::placeholder {
+            color: #94a3b8;
+        }
+
+        .input-error {
+            border-color: #ef4444;
+            background: #fef2f2;
+        }
+
+        .input-error:focus {
+            box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.1);
+        }
+
+        .help-text {
+            font-size: 0.85rem;
+            color: #64748b;
+            margin-top: 0.5rem;
+        }
+
+        .form-actions {
+            display: flex;
+            gap: 1rem;
+            margin-top: 2.5rem;
+        }
+
+        button {
+            flex: 1;
+            padding: 1rem 2rem;
+            font-size: 1rem;
+            border: 2px solid rgba(139, 92, 246, 0.2);
+            background: white;
+            color: #1e293b;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            font-weight: 600;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.05);
+        }
+
+        button::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(139, 92, 246, 0.1), transparent);
+            transition: left 0.5s;
+        }
+
+        button:hover::before {
+            left: 100%;
+        }
+
+        button:hover {
+            background: #f8fafc;
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(139, 92, 246, 0.15);
+            border-color: rgba(139, 92, 246, 0.4);
+        }
+
+        button:active {
+            transform: translateY(0);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        button.primary {
+            background: linear-gradient(135deg, #8b5cf6, #a855f7);
+            color: white;
+            border-color: #8b5cf6;
+            flex: 2;
+        }
+
+        button.primary:hover {
+            background: linear-gradient(135deg, #7c3aed, #9333ea);
+            border-color: #7c3aed;
+            box-shadow: 0 8px 25px rgba(139, 92, 246, 0.3);
+        }
+
+        .error-message {
+            background: #fef2f2;
+            border: 1px solid #fecaca;
+            border-radius: 12px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            color: #dc2626;
+            font-size: 0.95rem;
+        }
+
+        .success-message {
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+            border-radius: 12px;
+            padding: 1rem;
+            margin-bottom: 1.5rem;
+            color: #16a34a;
+            font-size: 0.95rem;
+        }
+
+        .loading {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: white;
+            animation: spin 0.8s linear infinite;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 40px 20px;
+                border-radius: 24px;
+            }
+
+            .logo-container {
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+
+            .brand-text {
+                align-items: center;
+            }
+
+            .brand-name {
+                font-size: 1.5rem;
+            }
+
+            h1 {
+                font-size: 1.5rem;
+            }
+
+            .form-actions {
+                flex-direction: column;
+            }
+
+            button {
+                width: 100%;
+            }
+
+            button.primary {
+                flex: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo-container">
+                <div class="logo">
+                    <img src="pulpoo.png" alt="Pulpoo Logo">
+                </div>
+                <div class="brand-text">
+                    <div class="brand-name">Pulpoo</div>
+                    <div class="tagline">Voice Assistant</div>
+                </div>
+            </div>
+            <h1>Let's Get Started</h1>
+            <p class="subtitle">Tell us about yourself and the website you'd like to discuss</p>
+        </div>
+
+        <form id="setupForm">
+            <div id="messageContainer"></div>
+
+            <div class="form-group">
+                <label for="name">Full Name *</label>
+                <input
+                    type="text"
+                    id="name"
+                    name="name"
+                    placeholder="John Doe"
+                    required
+                    minlength="2"
+                    maxlength="100"
+                >
+                <div class="help-text">Your full name</div>
+            </div>
+
+            <div class="form-group">
+                <label for="email">Email Address *</label>
+                <input
+                    type="email"
+                    id="email"
+                    name="email"
+                    placeholder="john@example.com"
+                    required
+                >
+                <div class="help-text">We'll use this to confirm your appointment</div>
+            </div>
+
+            <div class="form-group">
+                <label for="website">Website URL *</label>
+                <input
+                    type="url"
+                    id="website"
+                    name="website"
+                    placeholder="https://example.com"
+                    required
+                >
+                <div class="help-text">The website you'd like to discuss (e.g., your company website)</div>
+            </div>
+
+            <div class="form-actions">
+                <button type="button" id="cancelBtn">Cancel</button>
+                <button type="submit" id="submitBtn" class="primary">
+                    Continue to Voice Chat →
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <script>
+        const form = document.getElementById('setupForm');
+        const nameInput = document.getElementById('name');
+        const emailInput = document.getElementById('email');
+        const websiteInput = document.getElementById('website');
+        const submitBtn = document.getElementById('submitBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
+        const messageContainer = document.getElementById('messageContainer');
+
+        // Validate email format
+        emailInput.addEventListener('blur', () => {
+            if (emailInput.value && !isValidEmail(emailInput.value)) {
+                emailInput.classList.add('input-error');
+            } else {
+                emailInput.classList.remove('input-error');
+            }
+        });
+
+        // Validate URL format
+        websiteInput.addEventListener('blur', () => {
+            if (websiteInput.value && !isValidUrl(websiteInput.value)) {
+                websiteInput.classList.add('input-error');
+            } else {
+                websiteInput.classList.remove('input-error');
+            }
+        });
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            // Validate all fields
+            const name = nameInput.value.trim();
+            const email = emailInput.value.trim();
+            const website = websiteInput.value.trim();
+
+            if (!name || !email || !website) {
+                showError('Please fill in all required fields');
+                return;
+            }
+
+            if (!isValidEmail(email)) {
+                showError('Please enter a valid email address');
+                emailInput.classList.add('input-error');
+                return;
+            }
+
+            if (!isValidUrl(website)) {
+                showError('Please enter a valid website URL');
+                websiteInput.classList.add('input-error');
+                return;
+            }
+
+            try {
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<span class="loading"></span>Preparing...';
+
+                // Send form data to server
+                const response = await fetch('/setup', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        name,
+                        email,
+                        website_url: website,
+                    }),
+                });
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Failed to process form');
+                }
+
+                const result = await response.json();
+
+                // Store session info
+                sessionStorage.setItem('sessionId', result.session_id);
+                sessionStorage.setItem('userInfo', JSON.stringify({
+                    name,
+                    email,
+                    website_url: website,
+                }));
+
+                // Redirect to voice chat
+                showSuccess('Ready! Redirecting to voice chat...');
+                setTimeout(() => {
+                    window.location.href = '/chat.html';
+                }, 1500);
+
+            } catch (error) {
+                submitBtn.disabled = false;
+                submitBtn.innerHTML = 'Continue to Voice Chat →';
+                showError(error.message);
+            }
+        });
+
+        cancelBtn.addEventListener('click', () => {
+            // Clear form
+            form.reset();
+            messageContainer.innerHTML = '';
+        });
+
+        function showError(message) {
+            messageContainer.innerHTML = `<div class="error-message">${escapeHtml(message)}</div>`;
+            messageContainer.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function showSuccess(message) {
+            messageContainer.innerHTML = `<div class="success-message">${escapeHtml(message)}</div>`;
+        }
+
+        function isValidEmail(email) {
+            return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+        }
+
+        function isValidUrl(url) {
+            try {
+                new URL(url);
+                return true;
+            } catch {
+                return false;
+            }
+        }
+
+        function escapeHtml(text) {
+            const map = {
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;',
+            };
+            return text.replace(/[&<>"']/g, (m) => map[m]);
+        }
+
+        // Restore form data from session storage if available
+        window.addEventListener('load', () => {
+            const userInfo = sessionStorage.getItem('userInfo');
+            if (userInfo) {
+                const info = JSON.parse(userInfo);
+                nameInput.value = info.name || '';
+                emailInput.value = info.email || '';
+                websiteInput.value = info.website_url || '';
+            }
+        });
+    </script>
+</body>
+</html>

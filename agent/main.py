@@ -2,10 +2,10 @@
 Main server for the Voice Agent.
 
 Provides:
-- HTTP endpoint to serve the web UI
+- HTTP endpoints for UI pages and setup
 - WebSocket endpoint for real-time audio/text communication
 - Integration with Deepgram for speech-to-text
-- Integration with Pydantic AI agent
+- Integration with Pydantic AI agent for intelligent responses
 """
 
 import asyncio
@@ -13,14 +13,20 @@ import json
 import logging
 import os
 import base64
+import uuid
 from typing import Optional
 
+from dotenv import load_dotenv
 import aiohttp
 from aiohttp import web
-import deepgram
+from deepgram import DeepgramClient
+
+# Load environment variables from .env file
+load_dotenv()
 
 from config import get_voice_config
 from voice_agent import VoiceAssistant
+from web_scraper import WebScraper
 
 # Configure logging
 logging.basicConfig(
@@ -31,26 +37,33 @@ logger = logging.getLogger(__name__)
 
 
 class VoiceServer:
-    """WebSocket server for voice interactions."""
+    """Web server for voice interactions with multi-page support."""
 
     def __init__(self):
         """Initialize the voice server."""
         self.config = get_voice_config()
         self.voice_assistant = VoiceAssistant()
+        self.web_scraper = WebScraper(self.config.openai_api_key)
         self.app = web.Application()
+        self.sessions = {}  # Store session data
         self._setup_routes()
 
     def _setup_routes(self):
         """Setup HTTP and WebSocket routes."""
-        self.app.router.add_get("/", self._http_handler)
+        self.app.router.add_get("/", self._index_handler)
+        self.app.router.add_get("/input.html", self._input_handler)
+        self.app.router.add_get("/chat.html", self._chat_handler)
+        self.app.router.add_post("/setup", self._setup_handler)
         self.app.router.add_get("/ws", self._websocket_handler)
-        # Serve static files (pulpoo.png, etc.)
+        
+        # Serve static files
         static_path = os.path.join(os.path.dirname(__file__), "..", "server")
         if os.path.exists(static_path):
             self.app.router.add_static("/static", static_path)
+            self.app.router.add_static("/", static_path)
 
-    async def _http_handler(self, request: web.Request) -> web.Response:
-        """Serve the HTML UI."""
+    async def _index_handler(self, request: web.Request) -> web.Response:
+        """Serve the main index page."""
         html_path = os.path.join(
             os.path.dirname(__file__), "..", "server", "index.html"
         )
@@ -58,9 +71,102 @@ class VoiceServer:
             with open(html_path, "r") as f:
                 return web.Response(text=f.read(), content_type="text/html")
         return web.Response(
-            text="<h1>Voice Agent Ready</h1><p>WebSocket: ws://localhost:8084/ws</p>",
+            text="<h1>Voice Agent Ready</h1><p>Please navigate to http://localhost:8084</p>",
             content_type="text/html",
         )
+
+    async def _input_handler(self, request: web.Request) -> web.Response:
+        """Serve the user input form page."""
+        html_path = os.path.join(
+            os.path.dirname(__file__), "..", "server", "input.html"
+        )
+        if os.path.exists(html_path):
+            with open(html_path, "r") as f:
+                return web.Response(text=f.read(), content_type="text/html")
+        return web.Response(text="Input form not found", status=404)
+
+    async def _chat_handler(self, request: web.Request) -> web.Response:
+        """Serve the voice chat page."""
+        html_path = os.path.join(
+            os.path.dirname(__file__), "..", "server", "chat.html"
+        )
+        if os.path.exists(html_path):
+            with open(html_path, "r") as f:
+                return web.Response(text=f.read(), content_type="text/html")
+        return web.Response(text="Chat page not found", status=404)
+
+    async def _setup_handler(self, request: web.Request) -> web.Response:
+        """Handle user setup and web scraping initiation."""
+        try:
+            data = await request.json()
+            
+            name = data.get("name", "").strip()
+            email = data.get("email", "").strip()
+            website_url = data.get("website_url", "").strip()
+            
+            if not all([name, email, website_url]):
+                return web.json_response(
+                    {"error": "Missing required fields"},
+                    status=400
+                )
+            
+            # Create session
+            session_id = str(uuid.uuid4())
+            
+            logger.info(f"Setup request: {name} ({email}) - {website_url}")
+            
+            # Scrape the website asynchronously
+            try:
+                scraped_result = await self.web_scraper.scrape_and_embed(website_url)
+                if not scraped_result:
+                    logger.warning(f"Failed to scrape {website_url}")
+                    scraped_content = None
+                else:
+                    scraped_content, embedding = scraped_result
+            except Exception as e:
+                logger.error(f"Error scraping website: {e}")
+                scraped_content = None
+            
+            # Store session data
+            self.sessions[session_id] = {
+                "name": name,
+                "email": email,
+                "website_url": website_url,
+                "scraped_content": scraped_content,
+            }
+            
+            # Initialize voice assistant with user context
+            self.voice_assistant.update_context_with_user_info(name, email, website_url)
+            # Set scraped content if available
+            if scraped_content and self.voice_assistant.conversation_context:
+                # Update context with scraped content
+                self.voice_assistant.conversation_context = self.voice_assistant.conversation_context.model_copy(
+                    update={"scraped_content": scraped_content}
+                )
+            
+            logger.info(f"Session created: {session_id}")
+            
+            return web.json_response({
+                "success": True,
+                "session_id": session_id,
+                "message": "Ready for voice chat",
+                "scraped_content": {
+                    "title": scraped_content.title if scraped_content else None,
+                    "summary": scraped_content.summary if scraped_content else None,
+                } if scraped_content else None,
+            })
+            
+        except json.JSONDecodeError:
+            return web.json_response(
+                {"error": "Invalid JSON"},
+                status=400
+            )
+        except Exception as e:
+            logger.error(f"Error in setup handler: {e}", exc_info=True)
+            return web.json_response(
+                {"error": f"Server error: {str(e)}"},
+                status=500
+            )
 
     async def _websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
         """Handle WebSocket connections for voice streaming."""
@@ -70,7 +176,6 @@ class VoiceServer:
         session_id = f"session_{id(ws)}"
         logger.info(f"New WebSocket connection: {session_id}")
 
-        deepgram_ws: Optional[object] = None
         current_transcript = ""
 
         try:
@@ -78,14 +183,7 @@ class VoiceServer:
             await self.voice_assistant.initialize()
 
             # Connect to Deepgram for STT
-            dg_client = deepgram.Deepgram(self.config.deepgram_api_key)
-
-            # Create Deepgram websocket options
-            options = deepgram.PrerecordedOptions(
-                model=self.config.deepgram_model,
-                language="en",
-                punctuate=True,
-            )
+            dg_client = DeepgramClient(api_key=self.config.deepgram_api_key)
 
             # Listen for messages from browser
             async for msg in ws:
@@ -100,14 +198,21 @@ class VoiceServer:
 
                             # Send to Deepgram for transcription
                             try:
-                                response = await dg_client.transcription.prerecorded(
-                                    audio_bytes,
-                                    options,
+                                response = await dg_client.listen.v1.media.transcribe_file(
+                                    request=audio_bytes,
+                                    model=self.config.deepgram_model,
+                                    language="en",
+                                    punctuate=True,
                                 )
 
-                                # Extract transcript
-                                if response and response.get("results"):
-                                    transcript = response["results"].get("channels", [{}])[0].get("alternatives", [{}])[0].get("transcript", "")
+                                # Extract transcript from Deepgram response
+                                transcript = ""
+                                if response and response.results:
+                                    channels = response.results.channels
+                                    if channels and len(channels) > 0:
+                                        alternatives = channels[0].alternatives
+                                        if alternatives and len(alternatives) > 0:
+                                            transcript = alternatives[0].transcript or ""
 
                                     if transcript and transcript != current_transcript:
                                         current_transcript = transcript
@@ -218,7 +323,7 @@ class VoiceServer:
 async def main():
     """Main entry point."""
     logger.info("Starting Voice Agent Server")
-    logger.info("Using: Deepgram STT + OpenAI LLM + OpenAI TTS")
+    logger.info("Using: Deepgram STT + OpenAI LLM + OpenAI TTS + Web Scraping")
 
     server = VoiceServer()
     await server.start()

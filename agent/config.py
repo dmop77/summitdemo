@@ -56,14 +56,14 @@ class VoiceConfig(BaseSettings):
         description="Cartesia voice ID"
     )
 
-    # Pulpoo API (task creation)
+    # Pulpoo API (appointment creation)
     pulpoo_api_key: str = Field(
         default="",
-        description="Pulpoo API key"
+        description="Pulpoo API key for appointment creation"
     )
     pulpoo_api_url: str = Field(
         default="https://api.pulpoo.com/v1/external/tasks/create",
-        description="Pulpoo API endpoint"
+        description="Pulpoo API endpoint for creating appointments"
     )
 
     # Server configuration
@@ -81,21 +81,28 @@ class AgentConfig(BaseSettings):
     """Configuration for the AI agent behavior."""
 
     system_prompt: str = Field(
-        default="""You are a friendly and professional support agent for Pulpoo.
+        default="""You are a knowledgeable and friendly voice assistant for Pulpoo.
 
 Your responsibilities:
-1. Greet users warmly and professionally
-2. Listen actively to understand their needs
-3. Collect relevant contact information
-4. Help schedule meetings or create support tickets
-5. Summarize issues clearly and concisely
+1. Greet the user warmly and professionally
+2. Acknowledge the website or information they've shared
+3. Ask clarifying questions about their needs and goals
+4. Discuss relevant details from the scraped website content
+5. Help schedule an appointment at a convenient time
+6. Confirm appointment details before concluding
 
-Guidelines:
-- Be conversational and helpful
-- Keep responses under 100 words
-- Ask clarifying questions when needed
-- Use the create_task tool to log important issues""",
-        description="System prompt for the agent"
+When using tools:
+- Use scrape_website only if the user provides a URL you haven't scraped
+- Use get_available_slots to show appointment options
+- Use create_appointment when the user is ready to schedule
+
+Communication style:
+- Be conversational and empathetic
+- Keep responses concise (under 150 words per response)
+- Ask open-ended questions to understand needs better
+- Summarize key points to ensure understanding
+- Always confirm details before creating appointments""",
+        description="System prompt for the voice agent"
     )
 
     max_conversation_history: int = Field(
@@ -106,6 +113,7 @@ Guidelines:
     class Config:
         env_file = ".env"
         case_sensitive = False
+        extra = "ignore"  # Ignore extra environment variables
 
 
 def get_voice_config() -> VoiceConfig:
