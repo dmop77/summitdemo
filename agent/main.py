@@ -14,6 +14,7 @@ import logging
 import os
 import base64
 import uuid
+import struct
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -47,6 +48,48 @@ class VoiceServer:
         self.app = web.Application()
         self.sessions = {}  # Store session data
         self._setup_routes()
+
+    @staticmethod
+    def _create_wav_header(audio_bytes: bytes, sample_rate: int = 24000, channels: int = 1,
+                          sample_width: int = 2) -> bytes:
+        """
+        Create WAV file header for PCM16 audio data.
+
+        Args:
+            audio_bytes: Raw PCM16 audio data
+            sample_rate: Sample rate in Hz (default 24000)
+            channels: Number of channels (default 1 for mono)
+            sample_width: Bytes per sample (default 2 for PCM16)
+
+        Returns:
+            Complete WAV file with headers
+        """
+        # Calculate sizes
+        byte_rate = sample_rate * channels * sample_width
+        block_align = channels * sample_width
+
+        # WAV header structure
+        wav_header = b'RIFF'
+        file_size = 36 + len(audio_bytes)
+        wav_header += struct.pack('<I', file_size)
+        wav_header += b'WAVE'
+
+        # fmt sub-chunk
+        wav_header += b'fmt '
+        wav_header += struct.pack('<I', 16)  # Subchunk size
+        wav_header += struct.pack('<H', 1)   # Audio format (1 = PCM)
+        wav_header += struct.pack('<H', channels)
+        wav_header += struct.pack('<I', sample_rate)
+        wav_header += struct.pack('<I', byte_rate)
+        wav_header += struct.pack('<H', block_align)
+        wav_header += struct.pack('<H', sample_width * 8)  # Bits per sample
+
+        # data sub-chunk
+        wav_header += b'data'
+        wav_header += struct.pack('<I', len(audio_bytes))
+        wav_header += audio_bytes
+
+        return wav_header
 
     def _setup_routes(self):
         """Setup HTTP and WebSocket routes."""
@@ -137,12 +180,13 @@ class VoiceServer:
             
             # Initialize voice assistant with user context
             self.voice_assistant.update_context_with_user_info(name, email, website_url)
+
             # Set scraped content if available
-            if scraped_content and self.voice_assistant.conversation_context:
-                # Update context with scraped content
-                self.voice_assistant.conversation_context = self.voice_assistant.conversation_context.model_copy(
-                    update={"scraped_content": scraped_content}
-                )
+            if scraped_content:
+                # Update context and agent prompt with scraped content
+                self.voice_assistant.update_context_with_scraped_content(scraped_content)
+            else:
+                logger.warning(f"No scraped content available for {website_url}")
             
             logger.info(f"Session created: {session_id}")
             
@@ -168,6 +212,50 @@ class VoiceServer:
                 status=500
             )
 
+    async def _send_greeting(self, user_name: str, ws: web.WebSocketResponse) -> str:
+        """
+        Send an automatic greeting to the user when voice session starts.
+
+        Args:
+            user_name: User's name
+            ws: WebSocket connection
+
+        Returns:
+            Greeting message text
+        """
+        try:
+            session_id = f"session_{id(ws)}"
+            greeting_prompt = f"Greet {user_name} warmly and ask how you can help them with their Pulpoo needs."
+
+            # Generate greeting from agent
+            greeting_response = await self.voice_assistant.process_message(
+                greeting_prompt, session_id
+            )
+
+            logger.info(f"Sending greeting: {greeting_response}")
+
+            # Send greeting text
+            await ws.send_json({
+                "type": "response.text",
+                "text": greeting_response,
+            })
+
+            # Synthesize and send greeting audio
+            audio_data = await self._synthesize_speech(greeting_response)
+            if audio_data:
+                await ws.send_json({
+                    "type": "response.audio.delta",
+                    "delta": audio_data,
+                })
+            else:
+                logger.warning("Failed to synthesize greeting audio")
+
+            return greeting_response
+
+        except Exception as e:
+            logger.error(f"Error sending greeting: {e}", exc_info=True)
+            return ""
+
     async def _websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
         """Handle WebSocket connections for voice streaming."""
         ws = web.WebSocketResponse()
@@ -177,6 +265,7 @@ class VoiceServer:
         logger.info(f"New WebSocket connection: {session_id}")
 
         current_transcript = ""
+        greeting_sent = False
 
         try:
             # Initialize voice assistant
@@ -184,6 +273,17 @@ class VoiceServer:
 
             # Connect to Deepgram for STT
             dg_client = DeepgramClient(api_key=self.config.deepgram_api_key)
+
+            # Send automatic greeting if user info is available (after WebSocket is ready)
+            if self.voice_assistant.conversation_context and self.voice_assistant.conversation_context.user_info and not greeting_sent:
+                try:
+                    await self._send_greeting(
+                        self.voice_assistant.conversation_context.user_info.name,
+                        ws
+                    )
+                    greeting_sent = True
+                except Exception as e:
+                    logger.error(f"Error sending greeting: {e}")
 
             # Listen for messages from browser
             async for msg in ws:
@@ -194,12 +294,22 @@ class VoiceServer:
                     if data.get("type") == "input_audio_buffer.append":
                         audio_b64 = data.get("audio", "")
                         if audio_b64:
-                            audio_bytes = base64.b64decode(audio_b64)
+                            # Decode base64 to get raw PCM16 bytes
+                            raw_audio_bytes = base64.b64decode(audio_b64)
+
+                            # Wrap raw PCM16 audio in WAV format for Deepgram
+                            # Browser sends PCM16 at 24000 Hz, mono
+                            wav_audio = self._create_wav_header(
+                                raw_audio_bytes,
+                                sample_rate=24000,
+                                channels=1,
+                                sample_width=2
+                            )
 
                             # Send to Deepgram for transcription
                             try:
-                                response = await dg_client.listen.v1.media.transcribe_file(
-                                    request=audio_bytes,
+                                response = dg_client.listen.v1.media.transcribe_file(
+                                    request=wav_audio,
                                     model=self.config.deepgram_model,
                                     language="en",
                                     punctuate=True,
@@ -214,8 +324,8 @@ class VoiceServer:
                                         if alternatives and len(alternatives) > 0:
                                             transcript = alternatives[0].transcript or ""
 
-                                    if transcript and transcript != current_transcript:
-                                        current_transcript = transcript
+                                    # Only process if we have a non-empty transcript
+                                    if transcript and transcript.strip():
                                         logger.info(f"Transcript: {transcript}")
 
                                         # Send transcript to client
@@ -229,19 +339,24 @@ class VoiceServer:
                                             transcript, session_id
                                         )
 
+                                        logger.info(f"Agent will respond: {response_text[:100]}")
+
                                         # Send agent response
                                         await ws.send_json({
                                             "type": "response.text",
                                             "text": response_text,
                                         })
 
-                                        # Synthesize speech with OpenAI
+                                        # Synthesize speech with Cartesia
                                         audio_data = await self._synthesize_speech(response_text)
                                         if audio_data:
+                                            logger.info(f"Sending audio response: {len(audio_data)} chars")
                                             await ws.send_json({
                                                 "type": "response.audio.delta",
                                                 "delta": audio_data,
                                             })
+                                        else:
+                                            logger.warning("Failed to synthesize audio response")
 
                             except Exception as e:
                                 logger.error(f"Error transcribing audio: {e}")
@@ -263,7 +378,7 @@ class VoiceServer:
 
     async def _synthesize_speech(self, text: str) -> Optional[str]:
         """
-        Synthesize speech using OpenAI TTS.
+        Synthesize speech using Cartesia TTS.
 
         Args:
             text: Text to synthesize
@@ -272,32 +387,53 @@ class VoiceServer:
             Base64-encoded audio data or None on error
         """
         try:
+            logger.info(f"Synthesizing speech: {text[:100]}...")
+
+            # Check if Cartesia API key is configured
+            if not self.config.cartesia_api_key:
+                logger.error("Cartesia API key not configured")
+                return None
+
             async with aiohttp.ClientSession() as session:
                 headers = {
-                    "Authorization": f"Bearer {self.config.openai_api_key}",
+                    "X-API-Key": self.config.cartesia_api_key,
+                    "Content-Type": "application/json",
+                    "Cartesia-Version": "2025-04-16",
                 }
 
                 payload = {
-                    "model": "tts-1",
-                    "input": text,
-                    "voice": self.config.openai_tts_voice,
+                    "model_id": "sonic-english",
+                    "transcript": text,
+                    "voice": {
+                        "mode": "id",
+                        "id": self.config.cartesia_voice_id,
+                    },
+                    "output_format": {
+                        "container": "raw",
+                        "encoding": "pcm_s16le",
+                        "sample_rate": 24000,
+                    }
                 }
 
+                logger.info(f"Calling Cartesia TTS API with voice ID: {self.config.cartesia_voice_id}")
+
                 async with session.post(
-                    "https://api.openai.com/v1/audio/speech",
+                    "https://api.cartesia.ai/tts/bytes",
                     json=payload,
                     headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=10),
+                    timeout=aiohttp.ClientTimeout(total=30),
                 ) as response:
                     if response.status == 200:
                         audio_bytes = await response.read()
+                        logger.info(f"Cartesia TTS success: {len(audio_bytes)} bytes")
                         return base64.b64encode(audio_bytes).decode()
                     else:
-                        logger.error(f"TTS error: {response.status}")
+                        error_text = await response.text()
+                        logger.error(f"Cartesia TTS error {response.status}: {error_text}")
                         return None
 
         except Exception as e:
-            logger.error(f"Error synthesizing speech: {e}")
+            logger.error(f"Error synthesizing speech with Cartesia: {e}", exc_info=True)
             return None
 
     async def start(self):
@@ -323,7 +459,7 @@ class VoiceServer:
 async def main():
     """Main entry point."""
     logger.info("Starting Voice Agent Server")
-    logger.info("Using: Deepgram STT + OpenAI LLM + OpenAI TTS + Web Scraping")
+    logger.info("Using: Deepgram STT + OpenAI LLM + Cartesia TTS + Web Scraping")
 
     server = VoiceServer()
     await server.start()

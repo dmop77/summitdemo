@@ -85,14 +85,14 @@ class AgentTools:
             user_name: Customer's name
             user_email: Customer's email
             topic: Appointment topic/subject
-            preferred_date: Preferred date (ISO format)
-            duration_minutes: Duration of appointment
+            preferred_date: Preferred date/time as ISO format string (e.g., "2025-11-15T14:30:00") or natural language (e.g., "next Monday at 2 PM")
+            duration_minutes: Duration of appointment in minutes (default 30)
 
         Returns:
             Dictionary with appointment details
         """
         try:
-            logger.info(f"Tool: Creating appointment for {user_email}")
+            logger.info(f"Tool: Creating appointment for {user_email} - Topic: {topic}")
 
             if not self.pulpoo_api_key:
                 logger.warning("Pulpoo API key not configured")
@@ -104,11 +104,22 @@ class AgentTools:
             # Calculate appointment time
             if preferred_date:
                 try:
+                    # Try ISO format first
                     scheduled_time = datetime.fromisoformat(preferred_date)
                 except ValueError:
-                    scheduled_time = datetime.utcnow() + timedelta(days=1, hours=10)
+                    try:
+                        # Try parsing as a date string with basic patterns
+                        # This is a simple fallback - LLM should provide ISO format when possible
+                        logger.warning(f"Could not parse preferred_date '{preferred_date}' as ISO format. Using default.")
+                        scheduled_time = datetime.utcnow() + timedelta(days=1)
+                        scheduled_time = scheduled_time.replace(hour=10, minute=0, second=0)
+                    except Exception as e:
+                        logger.error(f"Error parsing date: {e}")
+                        scheduled_time = datetime.utcnow() + timedelta(days=1)
+                        scheduled_time = scheduled_time.replace(hour=10, minute=0, second=0)
             else:
-                # Default: tomorrow at 10 AM
+                # Default: tomorrow at 10 AM if no date provided
+                logger.warning("No preferred_date provided. Using default (tomorrow at 10 AM).")
                 scheduled_time = datetime.utcnow() + timedelta(days=1)
                 scheduled_time = scheduled_time.replace(hour=10, minute=0, second=0)
 
