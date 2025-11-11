@@ -196,6 +196,9 @@ class ConversationContext(BaseModel):
                 },
                 "conversation_history": [],
                 "current_state": "greeting",
+                "appointment_booking_state": "idle",
+                "pending_appointment_topic": None,
+                "selected_appointment_slot": None,
             }
         }
     )
@@ -206,6 +209,25 @@ class ConversationContext(BaseModel):
     conversation_history: List[VoiceAgentMessage] = Field(default_factory=list)
     scheduled_appointment: Optional[ScheduledAppointment] = Field(None)
     current_state: str = Field(default="greeting", description="Current conversation state")
+    
+    # Appointment booking state tracking
+    appointment_booking_state: str = Field(
+        default="idle", 
+        description="State of appointment booking: idle, topic_provided, slots_shown, slot_selected, confirmed, completed"
+    )
+    pending_appointment_topic: Optional[str] = Field(
+        None,
+        description="Topic provided by user before showing slots"
+    )
+    selected_appointment_slot: Optional[dict] = Field(
+        None,
+        description="Selected appointment slot from available options (contains date_time and time_display)"
+    )
+    appointment_confirmation_awaited: bool = Field(
+        default=False,
+        description="Whether we're waiting for user confirmation of appointment details"
+    )
+    
     created_at: datetime = Field(default_factory=datetime.utcnow)
 
 
