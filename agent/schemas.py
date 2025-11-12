@@ -58,6 +58,7 @@ class UserInfo(BaseModel):
     website_url: Optional[str] = Field(None, description="Website URL provided by user")
     phone_number: Optional[str] = Field(None, description="User's phone number")
     issue_summary: Optional[str] = Field(None, description="Summary of user's issue or request")
+    website_summary: Optional[str] = Field(None, description="Summary of scraped website content")
 
 
 class ScrapedLinkRecord(BaseModel):

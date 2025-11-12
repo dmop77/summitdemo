@@ -26,7 +26,7 @@ from deepgram import DeepgramClient
 load_dotenv()
 
 from config import get_voice_config
-from voice_agent import VoiceAssistant
+from voice_agent import BackgroundAgent
 from web_scraper import WebScraper
 
 # Configure logging
@@ -43,7 +43,7 @@ class VoiceServer:
     def __init__(self):
         """Initialize the voice server."""
         self.config = get_voice_config()
-        self.voice_assistant = VoiceAssistant()
+        self.agent = BackgroundAgent()
         self.web_scraper = WebScraper(self.config.openai_api_key)
         self.app = web.Application()
         self.sessions = {}  # Store session data
@@ -179,12 +179,14 @@ class VoiceServer:
             }
             
             # Initialize voice assistant with user context
-            self.voice_assistant.update_context_with_user_info(name, email, website_url)
+            self.agent.set_user_info(name, email, website_url)
 
             # Set scraped content if available
             if scraped_content:
-                # Update context and agent prompt with scraped content
-                self.voice_assistant.update_context_with_scraped_content(scraped_content)
+                # Update context with the scraped content summary
+                # Extract the summary string from the ScrapedContent object
+                summary = scraped_content.summary if scraped_content.summary else scraped_content.content
+                self.agent.update_context_with_scraped_content(summary)
             else:
                 logger.warning(f"No scraped content available for {website_url}")
             
@@ -224,18 +226,14 @@ class VoiceServer:
             Greeting message text
         """
         try:
-            session_id = f"session_{id(ws)}"
+            # Generate greeting from agent using optimized method
+            greeting_response = await self.agent.get_greeting()
 
-            # Use a simple trigger message to get the agent to greet naturally
-            # The system prompt already instructs the agent to greet the user by name
-            greeting_trigger = "start"
+            if not greeting_response:
+                logger.warning("_send_greeting: No greeting generated or already sent")
+                return ""
 
-            # Generate greeting from agent (agent will greet based on system prompt)
-            greeting_response = await self.voice_assistant.process_message(
-                greeting_trigger, session_id
-            )
-
-            logger.info(f"Sending greeting: {greeting_response}")
+            logger.info(f"_send_greeting: Generated greeting: {greeting_response}")
 
             # Send greeting text to transcript
             await ws.send_json({
@@ -255,12 +253,12 @@ class VoiceServer:
                     "type": "response.audio.done",
                 })
             else:
-                logger.warning("Failed to synthesize greeting audio")
+                logger.warning("_send_greeting: Failed to synthesize greeting audio")
 
             return greeting_response
 
         except Exception as e:
-            logger.error(f"Error sending greeting: {e}", exc_info=True)
+            logger.error(f"_send_greeting: Error sending greeting: {e}", exc_info=True)
             return ""
 
     async def _websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
@@ -268,7 +266,8 @@ class VoiceServer:
         ws = web.WebSocketResponse()
         await ws.prepare(request)
 
-        session_id = f"session_{id(ws)}"
+        # Retrieve session_id from URL query parameters
+        session_id = request.rel_url.query.get('session_id', f"session_{id(ws)}")
         logger.info(f"New WebSocket connection: {session_id}")
 
         greeting_sent = False
@@ -276,6 +275,8 @@ class VoiceServer:
         # Audio accumulation for complete utterances
         audio_buffer = []
         silence_chunks = 0
+        timeout_count = 0  # Track consecutive timeouts
+        MAX_CONSECUTIVE_TIMEOUTS = 5  # Max consecutive timeouts before reset
         SILENCE_THRESHOLD = 3  # Number of silent chunks (~1.5 seconds) - balanced for accuracy and latency
         MIN_SPEECH_CHUNKS = 1  # Minimum speech chunks before considering it a valid utterance
         accumulated_transcript = ""
@@ -284,24 +285,43 @@ class VoiceServer:
 
         try:
             # Initialize voice assistant
-            await self.voice_assistant.initialize()
+            await self.agent.initialize()
 
-            # Reset conversation history for this new session
-            self.voice_assistant.reset_conversation()
+            # Restore session data if available (from setup phase)
+            if session_id in self.sessions:
+                session_data = self.sessions[session_id]
+                logger.info(f"Restoring session context for {session_data.get('name')}")
+                self.agent.set_user_info(
+                    name=session_data.get("name", ""),
+                    email=session_data.get("email", ""),
+                    website_url=session_data.get("website_url", ""),
+                    website_summary=session_data.get("scraped_content", "")
+                )
+            else:
+                # Reset conversation history for this new session if no session data
+                self.agent.reset_conversation()
 
             # Connect to Deepgram for STT
             dg_client = DeepgramClient(api_key=self.config.deepgram_api_key)
 
             # Send automatic greeting if user info is available (after WebSocket is ready)
-            if self.voice_assistant.conversation_context and self.voice_assistant.conversation_context.user_info and not greeting_sent:
+            # Add a small delay to ensure all context is properly initialized
+            if self.agent.conversation_context and self.agent.conversation_context.user_info and not greeting_sent:
                 try:
+                    logger.info(f"Sending greeting to {self.agent.conversation_context.user_info.name}")
+                    # Small delay to ensure all context is ready
+                    await asyncio.sleep(0.1)
                     await self._send_greeting(
-                        self.voice_assistant.conversation_context.user_info.name,
+                        self.agent.conversation_context.user_info.name,
                         ws
                     )
                     greeting_sent = True
                 except Exception as e:
-                    logger.error(f"Error sending greeting: {e}")
+                    logger.error(f"Error sending greeting: {e}", exc_info=True)
+            else:
+                logger.debug(f"Greeting conditions not met: context={bool(self.agent.conversation_context)}, "
+                           f"user_info={bool(self.agent.conversation_context.user_info if self.agent.conversation_context else None)}, "
+                           f"greeting_sent={greeting_sent}")
 
             # Listen for messages from browser
             async for msg in ws:
@@ -410,7 +430,7 @@ class VoiceServer:
                                         })
 
                                         # Get agent response
-                                        response_text = await self.voice_assistant.process_message(
+                                        response_text = await self.agent.process_message(
                                             final_transcript, session_id
                                         )
 
@@ -448,9 +468,19 @@ class VoiceServer:
                                 error_msg = str(e)
                                 if "408" in error_msg or "timeout" in error_msg.lower():
                                     logger.debug(f"Deepgram timeout (silence): {e}")
+                                    # Track consecutive timeouts
+                                    timeout_count += 1
+                                    if timeout_count > MAX_CONSECUTIVE_TIMEOUTS:
+                                        logger.warning(f"Too many consecutive timeouts ({timeout_count}), resetting buffers")
+                                        audio_buffer = []
+                                        silence_chunks = 0
+                                        timeout_count = 0
+                                        speech_chunk_count = 0
+                                        continue
+                                    
                                     # Treat timeout as silence
                                     silence_chunks += 1
-                                    logger.debug(f"Timeout = silence chunk {silence_chunks}/{SILENCE_THRESHOLD}")
+                                    logger.debug(f"Timeout = silence chunk {silence_chunks}/{SILENCE_THRESHOLD} (timeout_count={timeout_count})")
 
                                     # Process if we have accumulated audio and reached threshold
                                     if (silence_chunks >= SILENCE_THRESHOLD and
@@ -498,7 +528,7 @@ class VoiceServer:
                                                     "text": final_transcript,
                                                 })
 
-                                                response_text = await self.voice_assistant.process_message(
+                                                response_text = await self.agent.process_message(
                                                     final_transcript, session_id
                                                 )
 
@@ -523,6 +553,7 @@ class VoiceServer:
                                             # Reset
                                             audio_buffer = []
                                             silence_chunks = 0
+                                            timeout_count = 0
                                             speech_chunk_count = 0
                                             is_agent_speaking = False
 
@@ -530,6 +561,7 @@ class VoiceServer:
                                             logger.error(f"Error transcribing complete audio: {transcribe_error}")
                                             audio_buffer = []
                                             silence_chunks = 0
+                                            timeout_count = 0
                                             speech_chunk_count = 0
                                             is_agent_speaking = False
 
@@ -543,7 +575,7 @@ class VoiceServer:
         except Exception as e:
             logger.error(f"WebSocket error: {e}", exc_info=True)
         finally:
-            await self.voice_assistant.cleanup()
+            await self.agent.cleanup()
             logger.info(f"WebSocket connection closed: {session_id}")
 
         return ws

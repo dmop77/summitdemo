@@ -1,163 +1,229 @@
 """
-Voice Agent using Pydantic AI with Deepgram STT and OpenAI LLM.
+Context-aware voice agent for appointment scheduling.
 
-Features:
-- Deepgram speech-to-text
-- OpenAI GPT-4o-mini for intelligent responses
-- OpenAI or Cartesia TTS for speech synthesis
-- Web scraping with semantic embeddings
-- Appointment scheduling via Pulpoo
-- Real-time audio streaming
+This agent manages the entire conversation:
+1. Greets the user with their name
+2. Acknowledges their website/business
+3. Briefly chats about their needs
+4. Suggests an appointment
+5. Collects their preferred time
+6. Creates the appointment via Pulpoo
 """
 
 import logging
 from typing import Optional
+from datetime import datetime, timedelta
 
-import aiohttp
-from pydantic_ai import Agent, ModelSettings
+from pydantic_ai import Agent, RunContext
 from pydantic_ai.models.openai import OpenAIChatModel
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, UserPromptPart
 
 from config import get_voice_config, get_agent_config
-from schemas import VoiceAgentMessage, ConversationContext, UserInfo
-from agent_tools import AgentTools
+from schemas import ConversationContext, UserInfo
+from agent_tools import AppointmentScheduler
 
 logger = logging.getLogger(__name__)
 
 
-class VoiceAssistant:
-    """Main voice agent using Pydantic AI with integrated tools."""
+class ConversationState:
+    """Track conversation state for the agent."""
+
+    GREETING = "greeting"
+    CONVERSATION = "conversation"
+    APPOINTMENT_PROPOSAL = "appointment_proposal"
+    TIME_COLLECTION = "time_collection"
+    SCHEDULING = "scheduling"
+    COMPLETED = "completed"
+
+
+class BackgroundAgent:
+    """Context-aware agent managing the entire conversation."""
 
     def __init__(self):
-        """Initialize the voice assistant."""
+        """Initialize the background agent."""
         self.voice_config = get_voice_config()
         self.agent_config = get_agent_config()
-        self.http_session: Optional[aiohttp.ClientSession] = None
-        self.tools = AgentTools(
+
+        # Initialize appointment scheduler
+        self.scheduler = AppointmentScheduler(
             openai_api_key=self.voice_config.openai_api_key,
-            deepgram_api_key=self.voice_config.deepgram_api_key,
             pulpoo_api_key=self.voice_config.pulpoo_api_key,
         )
-        self.agent = None  # Will be created with context-aware prompt
-        self.conversation_context: Optional[ConversationContext] = None
-        self.dynamic_system_prompt: Optional[str] = None
-        self.message_history: list[ModelMessage] = []  # Track Pydantic AI message history
 
-    def _create_agent(self, system_prompt: Optional[str] = None) -> Agent:
-        """
-        Create the Pydantic AI agent with tools and system prompt.
+        # Create Pydantic AI agent
+        model = OpenAIChatModel(model_name=self.voice_config.openai_model)
+        self.agent = Agent(
+            model=model,
+            tools=[self._schedule_appointment_tool],
+            system_prompt=self._build_system_prompt(),
+        )
+
+        self.conversation_context: Optional[ConversationContext] = None
+        self.state = ConversationState.GREETING
+
+    def _build_system_prompt(self) -> str:
+        """Build dynamic system prompt based on context."""
+        prompt = """You are a friendly appointment scheduling assistant.
+
+Your goal is to help the user schedule a consultation or meeting.
+
+KEY INSTRUCTIONS:
+1. When the user mentions a time (e.g., "tomorrow at 2pm", "next Monday at 10am"), schedule the appointment immediately using the schedule_appointment_tool
+2. Extract the time clearly and use ISO format (e.g., "2025-11-15T14:00:00")
+3. Keep responses short and natural (1-3 sentences max)
+4. Be conversational, not robotic
+5. Once appointment is scheduled, confirm it to the user
+
+IMPORTANT:
+- Don't ask for name/email again - you already have it
+- When user provides a time, schedule it immediately
+- Interpret casual time references (tomorrow, next week, etc.) relative to today
+- Always convert to ISO datetime format for scheduling"""
+
+        return prompt
+
+    async def _schedule_appointment_tool(
+        self,
+        ctx: RunContext,
+        topic: str,
+        preferred_time: str,
+        summary: str = "",
+    ) -> str:
+        """Tool for scheduling appointments.
 
         Args:
-            system_prompt: Custom system prompt (uses dynamic prompt if provided)
+            ctx: Run context
+            topic: What the appointment is about
+            preferred_time: Time in ISO format (e.g., "2025-11-15T14:30:00")
+            summary: Brief summary of the conversation
 
         Returns:
-            Configured Agent instance
+            Confirmation message
         """
-        # Initialize the OpenAI model with ModelSettings for temperature
-        model = OpenAIChatModel(
-            model_name=self.voice_config.openai_model,
-            settings=ModelSettings(temperature=0.7),
+        if not self.conversation_context or not self.conversation_context.user_info:
+            return "Error: User information not available"
+
+        result = await self.scheduler.schedule_appointment(
+            user_name=self.conversation_context.user_info.name,
+            user_email=self.conversation_context.user_info.email,
+            appointment_topic=topic,
+            preferred_date=preferred_time,
+            summary_notes=summary,
         )
 
-        # Use provided system prompt or fall back to default
-        prompt = system_prompt or self.agent_config.system_prompt
-
-        # Create agent with system instructions
-        agent = Agent(
-            model=model,
-            system_prompt=prompt,
-            tools=[
-                self.tools.scrape_website,
-                self.tools.create_appointment,
-                self.tools.get_available_slots,
-            ],
-        )
-
-        return agent
-
-    async def initialize(self):
-        """Initialize the agent (set up HTTP session, etc.)."""
-        self.http_session = aiohttp.ClientSession()
-        logger.info("Voice Assistant initialized")
-
-    async def cleanup(self):
-        """Clean up resources."""
-        if self.http_session:
-            await self.http_session.close()
-        logger.info("Voice Assistant cleaned up")
-
-    def reset_conversation(self):
-        """Reset conversation history for a fresh session."""
-        self.message_history = []
-        if self.conversation_context:
-            self.conversation_context.conversation_history = []
-        logger.info("Conversation history reset")
+        if result["success"]:
+            self.state = ConversationState.COMPLETED
+            return result["message"]
+        else:
+            return f"Sorry, I couldn't schedule the appointment: {result['error']}"
 
     async def process_message(self, user_input: str, session_id: str) -> str:
-        """
-        Process a user message and return agent response.
+        """Process user message and return agent response.
 
         Args:
-            user_input: The user's message text
-            session_id: Unique conversation session ID
+            user_input: User's spoken/typed message
+            session_id: Conversation session ID
 
         Returns:
-            Agent's response text
+            Agent's response
         """
         try:
-            # Initialize conversation context if needed
+            # Initialize context if needed
             if self.conversation_context is None:
                 self.conversation_context = ConversationContext(session_id=session_id)
 
-            # Add user message to history
-            user_msg = VoiceAgentMessage(
-                message_id=f"msg_{len(self.conversation_context.conversation_history)}",
-                session_id=session_id,
-                speaker="user",
-                text=user_input,
-            )
-            self.conversation_context.conversation_history.append(user_msg)
+            # Build context-aware prompt
+            context_info = ""
+            if self.conversation_context.user_info:
+                user = self.conversation_context.user_info
+                context_info = f"""
+CONTEXT (known to you, don't ask for it):
+- User name: {user.name}
+- User email: {user.email}
+- Website: {user.website_url}
+- Website summary: {user.website_summary if hasattr(user, 'website_summary') else 'Not available'}
+"""
 
-            logger.info(f"User message: {user_input}")
+            # Add state-specific guidance
+            state_guidance = ""
+            if self.state == ConversationState.TIME_COLLECTION:
+                state_guidance = """
+The user has agreed to schedule. Now extract their preferred time from their message.
+If they give a time, schedule the appointment immediately.
+If unclear, ask for clarification."""
 
-            # Get agent response with conversation history
-            response = await self.agent.run(user_input, message_history=self.message_history)
+            # Prepare the full prompt for this turn
+            turn_prompt = f"""{context_info}
 
-            # Extract text from response - Pydantic AI v2 uses response.output
-            response_text = str(response.output) if hasattr(response, 'output') else str(response)
+{state_guidance}
+
+User message: {user_input}
+
+Respond naturally and helpfully. Keep it brief."""
+
+            # Run the agent
+            result = await self.agent.run(turn_prompt)
+            # Extract output from AgentRunResult object
+            response_text = result.output if hasattr(result, 'output') else str(result)
+
             logger.info(f"Agent response: {response_text}")
 
-            # Update message history with the new exchange
-            self.message_history = response.new_messages()
-
-            # Add agent message to history
-            agent_msg = VoiceAgentMessage(
-                message_id=f"msg_{len(self.conversation_context.conversation_history)}",
-                session_id=session_id,
-                speaker="agent",
-                text=response_text,
-            )
-            self.conversation_context.conversation_history.append(agent_msg)
+            # Update state based on conversation flow
+            if "schedule" in user_input.lower() or "time" in user_input.lower():
+                self.state = ConversationState.TIME_COLLECTION
 
             return response_text
 
         except Exception as e:
-            logger.error(f"Error processing message: {e}", exc_info=True)
-            return "I encountered an error processing your request. Could you please repeat that?"
+            logger.error(f"Error in agent: {e}", exc_info=True)
+            return "I encountered an error. Could you please repeat that?"
 
-    def update_context_with_user_info(self, name: str, email: str, website_url: str):
+    async def get_greeting(self) -> str:
+        """Generate a greeting message for the user.
+
+        Returns:
+            Greeting message
         """
-        Update conversation context with user information and rebuild agent with dynamic prompt.
+        try:
+            if not self.conversation_context or not self.conversation_context.user_info:
+                return "Hi there! I'm ready to help you schedule an appointment."
+
+            user = self.conversation_context.user_info
+            website_summary = user.website_summary if hasattr(user, 'website_summary') else 'Not available'
+            greeting_prompt = f"""Generate a brief greeting message in this exact format:
+
+Hello {user.name}, {website_summary}. Want to talk into it further? Let's schedule an appointment.
+
+Guidelines:
+- Start with "Hello [name],"
+- Include a brief 1 sentence summary of the website/business
+- End with "Want to talk into it further? Let's schedule an appointment."
+- Keep it natural and concise
+- One sentence for the website summary"""
+
+            result = await self.agent.run(greeting_prompt)
+            # Extract output from AgentRunResult object
+            greeting_text = result.output if hasattr(result, 'output') else str(result)
+            greeting_text = greeting_text.strip()
+            logger.info(f"Generated greeting: {greeting_text}")
+            return greeting_text
+
+        except Exception as e:
+            logger.error(f"Error generating greeting: {e}", exc_info=True)
+            # Fallback greeting if agent fails
+            user_name = self.conversation_context.user_info.name if self.conversation_context and self.conversation_context.user_info else "there"
+            return f"Hi {user_name}! Thanks for joining. Let's discuss scheduling an appointment."
+
+    def set_user_info(self, name: str, email: str, website_url: str, website_summary: str = ""):
+        """Set user information from setup phase.
 
         Args:
             name: User's name
             email: User's email
-            website_url: Website URL to scrape
+            website_url: User's website URL
+            website_summary: Summary of website content
         """
-        # Initialize context if needed
         if self.conversation_context is None:
-            import uuid
-            self.conversation_context = ConversationContext(session_id=str(uuid.uuid4()))
+            self.conversation_context = ConversationContext(session_id="temp")
 
         self.conversation_context.user_info = UserInfo(
             name=name,
@@ -165,73 +231,35 @@ class VoiceAssistant:
             website_url=website_url,
         )
 
-        # Build dynamic system prompt with user context
-        website_info = f"Website URL: {website_url}"
-        self.dynamic_system_prompt = self.agent_config.build_dynamic_prompt(
-            self.agent_config.system_prompt,
-            user_name=name,
-            user_email=email,
-            website_info=website_info
-        )
+        # Store summary if provided
+        if website_summary:
+            self.conversation_context.user_info.website_summary = website_summary
 
-        # Recreate agent with dynamic prompt
-        self.agent = self._create_agent(system_prompt=self.dynamic_system_prompt)
+        logger.info(f"Agent context set: {name} ({email})")
 
-        logger.info(f"Context updated with user info: {name} ({email})")
+    def reset(self):
+        """Reset agent for new conversation."""
+        self.conversation_context = None
+        self.state = ConversationState.GREETING
+        logger.info("Agent reset")
 
-    def update_context_with_scraped_content(self, scraped_content):
-        """
-        Update conversation context with scraped website content and rebuild agent prompt.
+    async def initialize(self):
+        """Initialize the agent (compatibility method)."""
+        pass
 
+    async def cleanup(self):
+        """Cleanup agent resources and reset state."""
+        self.reset()
+
+    def reset_conversation(self):
+        """Reset conversation (compatibility method)."""
+        self.reset()
+
+    def update_context_with_scraped_content(self, content: str):
+        """Update context with scraped website content (compatibility method).
+        
         Args:
-            scraped_content: ScrapedContent object with website information
+            content: Scraped website content/summary
         """
-        if self.conversation_context is None:
-            import uuid
-            self.conversation_context = ConversationContext(session_id=str(uuid.uuid4()))
-
-        self.conversation_context.scraped_content = scraped_content
-
-        # Rebuild dynamic prompt with scraped content
-        if self.conversation_context.user_info:
-            website_info = self._format_website_info(scraped_content)
-            self.dynamic_system_prompt = self.agent_config.build_dynamic_prompt(
-                self.agent_config.system_prompt,
-                user_name=self.conversation_context.user_info.name,
-                user_email=self.conversation_context.user_info.email,
-                website_info=website_info
-            )
-
-            # Recreate agent with updated prompt
-            self.agent = self._create_agent(system_prompt=self.dynamic_system_prompt)
-
-        logger.info(f"Context updated with scraped content from: {scraped_content.url}")
-
-    @staticmethod
-    def _format_website_info(scraped_content) -> str:
-        """
-        Format scraped content into readable website information.
-
-        Args:
-            scraped_content: ScrapedContent object
-
-        Returns:
-            Formatted website information string
-        """
-        info = f"Website Title: {scraped_content.title}\n"
-        info += f"Website URL: {scraped_content.url}\n"
-
-        if scraped_content.summary:
-            info += f"Website Summary: {scraped_content.summary}\n"
-
-        if scraped_content.content:
-            # Limit content to first 500 characters to keep prompt manageable
-            content_preview = scraped_content.content[:500]
-            if len(scraped_content.content) > 500:
-                content_preview += "..."
-            info += f"Website Content (preview): {content_preview}\n"
-
-        if scraped_content.pages_crawled:
-            info += f"Pages Crawled: {scraped_content.pages_crawled}\n"
-
-        return info
+        if self.conversation_context and self.conversation_context.user_info:
+            self.conversation_context.user_info.website_summary = content

@@ -1,236 +1,250 @@
-# Voice Agent - Pydantic AI
+# Voice Agent - Appointment Scheduling System
 
-A production-ready voice AI agent built with Pydantic AI, Deepgram (STT), and OpenAI (LLM).
+A real-time voice AI agent that schedules appointments by scraping user websites, understanding their business context, and creating appointments in Pulpoo.
 
-## Features
+## 🎯 How It Works
 
-- **Pydantic AI Framework**: Type-safe AI agent with structured outputs
-- **Deepgram STT**: High-quality speech-to-text transcription
-- **OpenAI LLM**: GPT-4o-mini for intelligent responses
-- **Optional TTS**: OpenAI or Cartesia text-to-speech
-- **Real-time WebSocket**: Live audio streaming and responses
-- **Task Creation**: Integration with Pulpoo API for task management
+### Conversation Flow
+1. **Setup Phase**: User provides name, email, and website URL
+2. **Web Scraping**: Agent scrapes and understands the user's website
+3. **Greeting**: Agent greets user by name and acknowledges their business
+4. **Natural Chat**: Brief conversation about their needs
+5. **Scheduling**: Agent suggests appointment and collects preferred time
+6. **Pulpoo Creation**: Creates appointment task in Pulpoo with full context
 
-## Architecture
+### Tech Stack
+- **Voice**: Deepgram STT + OpenAI TTS (via aiohttp WebSocket)
+- **AI Agent**: Pydantic AI with OpenAI LLM
+- **Scheduling**: Direct Pulpoo API integration
+- **Server**: aiohttp with WebSocket support
+- **Database**: Conversation context tracking
 
-```
-agent/
-├── main.py              # WebSocket server & HTTP endpoints
-├── voice_agent.py       # Pydantic AI agent logic
-├── config.py            # Configuration management (Pydantic)
-├── schemas.py           # Data models (Pydantic)
-└── requirements.txt     # Dependencies
-```
+## 📋 Prerequisites
 
-## Setup
+- Python 3.9+
+- API Keys:
+  - OpenAI (for LLM and TTS)
+  - Deepgram (for STT)
+  - Pulpoo (for appointment creation)
 
-### 1. Install Dependencies
+## 🚀 Quick Start
+
+### 1. Setup Environment
 
 ```bash
 cd agent
-python -m pip install -r requirements.txt
+
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
-### 2. Environment Configuration
+### 2. Configure Environment Variables
 
-Create `.env` file in the agent directory:
+Create a `.env` file in the agent directory:
 
 ```env
-# OpenAI
+# OpenAI Configuration
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-4o-mini
 
-# Deepgram (Speech-to-Text)
+# Deepgram Configuration
 DEEPGRAM_API_KEY=...
 DEEPGRAM_MODEL=nova-3
 
-# Text-to-Speech (choose one)
-# OpenAI TTS (default)
-OPENAI_TTS_VOICE=echo
-
-# OR Cartesia TTS (optional)
-# CARTESIA_API_KEY=...
-# CARTESIA_VOICE_ID=...
-
-# Pulpoo API (task creation - optional)
+# Pulpoo Configuration
 PULPOO_API_KEY=...
+PULPOO_API_URL=https://api.pulpoo.com/v1/external/tasks/create
 
-# Server
-PORT=8084
+# Server Configuration
 HOST=0.0.0.0
+PORT=8084
 DEBUG=false
 ```
 
-### 3. Run the Agent
+### 3. Run the Server
 
 ```bash
 python main.py
 ```
 
-Visit `http://localhost:8084` in your browser to test.
-
-## File Descriptions
-
-### `main.py`
-- WebSocket server using aiohttp
-- Handles audio streaming and real-time communication
-- Integrates Deepgram for speech transcription
-- Integrates OpenAI for TTS
-
-### `voice_agent.py`
-- Pydantic AI agent implementation
-- Handles conversation logic
-- Manages Pulpoo task creation
-- Maintains conversation context
-
-### `config.py`
-- Pydantic Settings for environment configuration
-- Supports multiple STT providers (Deepgram, OpenAI)
-- Supports multiple TTS providers (OpenAI, Cartesia)
-- Type-safe configuration with validation
-
-### `schemas.py`
-- Pydantic models for data validation
-- User info, conversation context, appointments
-- Scraped content and web scraper requests
-- Modern Pydantic v2 syntax with ConfigDict
-
-## Configuration Options
-
-### Speech-to-Text Providers
-
-**Deepgram (Recommended)**
-- Model: `nova-3` (latest) or `nova-2`
-- Fast and accurate transcription
-
-**OpenAI (Fallback)**
-- Uses Whisper API
-- Good for fallback scenarios
-
-### Text-to-Speech Providers
-
-**OpenAI TTS (Default)**
-- Voices: `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer`
-- Model: `tts-1` or `tts-1-hd`
-
-**Cartesia (Optional)**
-- Voice ID: configurable in `.env`
-- Lower latency for real-time applications
-
-## API Endpoints
-
-- `GET /` - Serves the web UI
-- `GET /ws` - WebSocket endpoint for voice streaming
-
-## WebSocket Protocol
-
-### Client → Server
-
-```json
-{
-  "type": "input_audio_buffer.append",
-  "audio": "base64_encoded_audio"
-}
+You should see:
+```
+✓ Server listening on http://0.0.0.0:8084
+✓ Open http://localhost:8084 in your browser
+Ready to accept connections!
 ```
 
-### Server → Client
+### 4. Access the Interface
 
-```json
-{
-  "type": "user.transcript",
-  "text": "User's transcribed message"
-}
+Open your browser to `http://localhost:8084`
+
+## 📦 Project Structure
+
+```
+agent/
+├── main.py                 # Server entry point (aiohttp)
+├── voice_agent.py         # BackgroundAgent - context-aware conversation manager
+├── agent_tools.py         # AppointmentScheduler - Pulpoo API integration
+├── web_scraper.py         # Website scraping and embedding
+├── config.py              # Configuration management
+├── schemas.py             # Pydantic data models
+├── tests/
+│   └── test_agent.py      # Unit tests for appointment scheduling
+├── requirements.txt       # Python dependencies
+└── README.md              # This file
 ```
 
-```json
-{
-  "type": "response.text",
-  "text": "Agent's response"
-}
+## 🔧 Core Components
+
+### BackgroundAgent (`voice_agent.py`)
+The main conversation manager that:
+- Maintains conversation context (user info, conversation state)
+- Manages conversation flow with state tracking
+- Uses Pydantic AI to generate intelligent responses
+- Calls appointment scheduling tool when appropriate
+
+**Key Methods:**
+- `process_message()` - Handle user input and generate agent response
+- `set_user_info()` - Set user context from setup phase
+- `reset()` - Reset for new conversation
+
+### AppointmentScheduler (`agent_tools.py`)
+Handles appointment creation with:
+- Pulpoo API integration
+- User information and conversation summary
+- Error handling and validation
+
+**Key Method:**
+- `schedule_appointment()` - Create appointment in Pulpoo
+
+### System Flow
+
+```
+User Message
+    ↓
+Voice Input (Deepgram STT)
+    ↓
+BackgroundAgent.process_message()
+    ↓
+LLM (OpenAI GPT-4o-mini)
+    ↓
+[Check if scheduling needed]
+    ├─ Yes → AppointmentScheduler.schedule_appointment()
+    │           ↓
+    │        Pulpoo API
+    │
+    └─ No → Continue conversation
+    ↓
+Voice Output (OpenAI TTS)
+    ↓
+User Hears Response
 ```
 
-```json
-{
-  "type": "response.audio.delta",
-  "delta": "base64_encoded_audio"
-}
-```
+## 🧪 Testing
 
-## Development
-
-### Project Structure
-
-- **Clean Separation**: Config, agent logic, and schemas are separated
-- **Type Safety**: All data validated with Pydantic v2
-- **Async Throughout**: Fully async/await implementation
-- **Minimal Dependencies**: Only essential packages included
-
-### Adding Tools
-
-To add tools to the agent, define them in `voice_agent.py`:
-
-```python
-@agent.define_tool
-async def my_tool(context: RunContext, param: str) -> str:
-    """Tool description"""
-    # Implementation
-    return result
-```
-
-### Testing
-
-Run tests with pytest:
+Run the test suite:
 
 ```bash
-pytest -v --asyncio-mode=auto
+pytest tests/test_agent.py -v
 ```
 
-## Troubleshooting
+Tests cover:
+- Appointment scheduler initialization
+- API key validation
+- Date format validation
+- Successful appointment creation with mocked Pulpoo API
 
-### Port Already in Use Error
+## 📝 API Endpoints
 
-If you see `[Errno 48] address already in use` when starting the server:
+### WebSocket
+- **Path**: `/ws`
+- **Protocol**: WebSocket for real-time audio streaming
+- **Purpose**: Handle voice input/output in real-time
 
-```bash
-# Find the process using port 8084
-lsof -ti:8084
+### HTTP Setup
+- **Path**: `/api/setup`
+- **Method**: POST
+- **Body**: `{"name": "...", "email": "...", "website_url": "..."}`
+- **Purpose**: Initialize user context and scrape website
 
-# Kill the process (replace PID with the number from above)
-kill -9 <PID>
+## 🔐 Security Notes
 
-# Or do it in one command
-kill -9 $(lsof -ti:8084)
+- API keys are loaded from `.env` (never commit to git)
+- `.gitignore` excludes sensitive files
+- Pulpoo API calls use secure headers
+- WebSocket connections are session-based
 
-# Verify port is free (should show no output)
-lsof -ti:8084
-```
+## 📊 Conversation Context
 
-Then restart the server:
+The agent maintains:
+- **User Info**: Name, email, website URL
+- **Conversation History**: All user and agent messages
+- **State**: Current phase (greeting, conversation, scheduling, etc.)
+- **Website Summary**: Scraped business information
 
-```bash
-python main.py
-```
+## 🐛 Troubleshooting
 
-### WebSocket Connection Issues
+### "OpenAI API key not configured"
+- Check `.env` file has `OPENAI_API_KEY`
+- Ensure key is valid and has proper permissions
+
+### "Connection to Deepgram failed"
+- Verify `DEEPGRAM_API_KEY` is correct
+- Check internet connection
+- Ensure Deepgram service is up
+
+### "Appointment creation failed"
+- Verify `PULPOO_API_KEY` is correct
+- Check Pulpoo API endpoint is accessible
+- Review error message in logs for details
+
+### WebSocket connection issues
+- Ensure firewall allows port 8084
 - Check browser console for errors
-- Ensure server is running on correct port
-- Verify firewall allows WebSocket connections
+- Verify server is running (`python main.py`)
 
-### Deepgram API Errors
-- Verify API key is set correctly
-- Check Deepgram dashboard for usage limits
-- Ensure model name is valid (`nova-3`, `nova-2`, etc.)
+## 📚 Dependencies
 
-### OpenAI API Errors
-- Verify OpenAI API key has correct permissions
-- Check API usage and billing status
-- Ensure model name is valid (`gpt-4o-mini`, etc.)
+Main packages:
+- `pydantic-ai` - AI agent framework
+- `openai` - OpenAI API client
+- `aiohttp` - Async HTTP client/server
+- `pydantic` - Data validation
+- `python-dotenv` - Environment variable management
 
-## License
+See `requirements.txt` for full list.
 
-MIT
+## 🎓 How the Agent Decides to Schedule
 
-## Support
+The agent uses the system prompt to understand when to call the scheduling tool:
+1. It tracks conversation state
+2. When user indicates interest in scheduling
+3. After collecting necessary time information
+4. It automatically calls `schedule_appointment_tool`
+5. The LLM passes context about the appointment
 
-For issues or questions, check the Pydantic AI documentation:
-- https://ai.pydantic.dev/
+The tool integration is automatic - the LLM learns to use tools through its system prompt and the function signature.
+
+## 🚀 Performance
+
+- **Latency**: Real-time with sub-second response times
+- **Concurrency**: Handles multiple concurrent conversations
+- **Reliability**: Error handling for API failures with fallbacks
+- **Efficiency**: Minimal token usage with focused prompts
+
+## 📞 Support
+
+For issues or questions:
+1. Check logs in console output
+2. Review `.env` configuration
+3. Verify all API keys are valid
+4. Check network connectivity
+5. Run tests: `pytest tests/test_agent.py -v`
+
+## 📄 License
+
+See LICENSE file in repository root.
