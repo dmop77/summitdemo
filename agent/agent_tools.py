@@ -57,9 +57,16 @@ class AppointmentScheduler:
                 logger.error("Pulpoo API key not configured")
                 return {"success": False, "error": "API key missing"}
 
-            # Parse the date
+            # Parse the date and validate it's in the future
             try:
                 scheduled_time = datetime.fromisoformat(preferred_date)
+                
+                # Validate that appointment is in the future
+                now = datetime.now()
+                if scheduled_time <= now:
+                    logger.error(f"Appointment time is in the past: {preferred_date}")
+                    return {"success": False, "error": "Appointment must be scheduled for a future date and time"}
+                    
             except (ValueError, TypeError):
                 logger.error(f"Invalid date format: {preferred_date}")
                 return {"success": False, "error": "Invalid date format"}

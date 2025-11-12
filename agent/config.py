@@ -38,7 +38,7 @@ class VoiceConfig(BaseSettings):
         description="OpenAI API key"
     )
     openai_model: str = Field(
-        default="gpt-4o-mini",
+        default="gpt-3.5-turbo",
         description="OpenAI LLM model"
     )
     openai_tts_voice: str = Field(

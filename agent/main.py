@@ -277,7 +277,7 @@ class VoiceServer:
         silence_chunks = 0
         timeout_count = 0  # Track consecutive timeouts
         MAX_CONSECUTIVE_TIMEOUTS = 5  # Max consecutive timeouts before reset
-        SILENCE_THRESHOLD = 3  # Number of silent chunks (~1.5 seconds) - balanced for accuracy and latency
+        SILENCE_THRESHOLD = 2  # Number of silent chunks (~1 second) - faster response
         MIN_SPEECH_CHUNKS = 1  # Minimum speech chunks before considering it a valid utterance
         accumulated_transcript = ""
         speech_chunk_count = 0
@@ -531,6 +531,12 @@ class VoiceServer:
                                                 response_text = await self.agent.process_message(
                                                     final_transcript, session_id
                                                 )
+
+                                                # If response is empty, conversation is completed - disconnect
+                                                if not response_text or not response_text.strip():
+                                                    logger.info("Conversation completed. Hanging up.")
+                                                    await ws.send_json({"type": "session.close"})
+                                                    break
 
                                                 logger.info(f"Agent will respond: {response_text[:100]}")
 
