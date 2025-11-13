@@ -211,7 +211,9 @@ Notes:
                 payload = {
                     "title": f"Appointment: {appointment_topic}",
                     "description": description,
-                    "assigned_to_email": "Efernandez@pulpoo.com",
+                    "assigned_to_email": "efernandez@pulpoo.com",
+                    "customer_email": user_email,
+                    "canal": "Engineering",
                     "deadline": deadline,
                     "importance": "HIGH",
                 }
