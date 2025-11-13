@@ -15,19 +15,22 @@ import os
 import base64
 import uuid
 import struct
+import time
 from typing import Optional
 
 from dotenv import load_dotenv
 import aiohttp
 from aiohttp import web
 from deepgram import DeepgramClient
+from openai import AsyncOpenAI
 
 # Load environment variables from .env file
 load_dotenv()
 
-from config import get_voice_config
-from voice_agent import BackgroundAgent
+from config import get_voice_config, get_audio_config
+from voice_agent import BackgroundAgent, ConversationState
 from web_scraper import WebScraper
+from db_client import SupabaseClient
 
 # Configure logging
 logging.basicConfig(
@@ -43,27 +46,46 @@ class VoiceServer:
     def __init__(self):
         """Initialize the voice server."""
         self.config = get_voice_config()
+        self.audio_config = get_audio_config()
         self.agent = BackgroundAgent()
         self.web_scraper = WebScraper(self.config.openai_api_key)
         self.app = web.Application()
         self.sessions = {}  # Store session data
+
+        # Initialize Supabase client
+        supabase_url = os.getenv("SUPABASE_URL", "")
+        supabase_key = os.getenv("SUPABASE_KEY", "")
+        self.db = None
+        if supabase_url and supabase_key:
+            try:
+                self.db = SupabaseClient(supabase_url, supabase_key)
+                logger.info("✓ Database client connected")
+            except Exception as e:
+                logger.warning(f"⚠️ Database connection failed: {e}")
+        else:
+            logger.warning("⚠️ SUPABASE_URL or SUPABASE_KEY not set - caching disabled")
+
         self._setup_routes()
 
-    @staticmethod
-    def _create_wav_header(audio_bytes: bytes, sample_rate: int = 24000, channels: int = 1,
-                          sample_width: int = 2) -> bytes:
+    def _create_wav_header(self, audio_bytes: bytes, sample_rate: int = None, channels: int = None,
+                          sample_width: int = None) -> bytes:
         """
         Create WAV file header for PCM16 audio data.
 
         Args:
             audio_bytes: Raw PCM16 audio data
-            sample_rate: Sample rate in Hz (default 24000)
-            channels: Number of channels (default 1 for mono)
-            sample_width: Bytes per sample (default 2 for PCM16)
+            sample_rate: Sample rate in Hz (default from config)
+            channels: Number of channels (default from config)
+            sample_width: Bytes per sample (default from config)
 
         Returns:
             Complete WAV file with headers
         """
+        # Use config defaults if not provided
+        sample_rate = sample_rate or self.audio_config.sample_rate
+        channels = channels or self.audio_config.channels
+        sample_width = sample_width or self.audio_config.sample_width
+
         # Calculate sizes
         byte_rate = sample_rate * channels * sample_width
         block_align = channels * sample_width
@@ -177,7 +199,45 @@ class VoiceServer:
                 "website_url": website_url,
                 "scraped_content": scraped_content,
             }
-            
+
+            # Save to database
+            db_user_id = None
+            if self.db:
+                try:
+                    # Get or create user
+                    user = await self.db.get_or_create_user(
+                        email=email,
+                        name=name,
+                        website_url=website_url
+                    )
+                    db_user_id = user.get("id")
+
+                    # Create session record
+                    website_summary = None
+                    if scraped_content and hasattr(scraped_content, 'summary'):
+                        website_summary = scraped_content.summary
+
+                    session = await self.db.create_session(
+                        user_id=db_user_id,
+                        session_id=session_id,
+                        website_summary=website_summary
+                    )
+
+                    # Save scraped content if available
+                    if scraped_content:
+                        await self.db.save_scraped_content(
+                            user_id=db_user_id,
+                            session_id=session.get("id"),
+                            url=website_url,
+                            title=scraped_content.title if hasattr(scraped_content, 'title') else "",
+                            summary=scraped_content.summary if hasattr(scraped_content, 'summary') else "",
+                            content=scraped_content.content if hasattr(scraped_content, 'content') else ""
+                        )
+
+                    logger.info(f"✓ Saved user and session to database: {db_user_id}")
+                except Exception as e:
+                    logger.error(f"⚠️ Error saving to database: {e}")
+
             # Initialize voice assistant with user context
             self.agent.set_user_info(name, email, website_url)
 
@@ -214,9 +274,123 @@ class VoiceServer:
                 status=500
             )
 
+    async def _send_greeting_and_overview(self, ws: web.WebSocketResponse) -> str:
+        """
+        Send greeting, overview, and engagement question automatically.
+        Runs in background - user can speak anytime (interrupts or waits).
+
+        Args:
+            ws: WebSocket connection
+
+        Returns:
+            Empty string (for background task)
+        """
+        try:
+            if self.agent.conversation_context and self.agent.conversation_context.user_info:
+                user = self.agent.conversation_context.user_info
+
+                # Step 1: Send greeting with name
+                # Clean up URL for speech (remove https://, trailing slash)
+                domain = str(user.website_url).replace("https://", "").replace("http://", "").rstrip("/")
+                greeting = f"Hi {user.name}! Thanks for joining me today."
+                logger.info(f"📢 Sending greeting: {greeting}")
+
+                await ws.send_json({
+                    "type": "response.text",
+                    "text": greeting,
+                })
+
+                # Try greeting audio (5 second timeout - Cartesia can be slow)
+                try:
+                    audio_data = await asyncio.wait_for(
+                        self._synthesize_speech(greeting),
+                        timeout=5.0
+                    )
+                    if audio_data:
+                        await ws.send_json({
+                            "type": "response.audio.delta",
+                            "delta": audio_data,
+                        })
+                        await ws.send_json({
+                            "type": "response.audio.done",
+                        })
+                        logger.info("✓ Greeting audio sent")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️  Greeting audio timeout (5s) - continuing")
+                except Exception as e:
+                    logger.warning(f"Greeting audio error: {e}")
+
+                # Small delay before overview
+                await asyncio.sleep(0.3)
+
+                # Step 2: Send detailed overview of what we learned from scraping
+                website_summary = ""
+                logger.info(f"Debug: user.website_summary = {getattr(user, 'website_summary', 'NOT SET')}")
+
+                if hasattr(user, 'website_summary') and user.website_summary:
+                    if isinstance(user.website_summary, str):
+                        website_summary = user.website_summary[:250]  # More content for overview
+                        logger.info(f"Using string summary: {website_summary[:100]}...")
+                    else:
+                        if hasattr(user.website_summary, 'summary'):
+                            website_summary = str(user.website_summary.summary)[:250]
+                            logger.info(f"Using object.summary: {website_summary[:100]}...")
+                        else:
+                            website_summary = str(user.website_summary)[:250]
+                            logger.info(f"Using str(object): {website_summary[:100]}...")
+                else:
+                    logger.warning("⚠️  No website_summary found - will send generic overview")
+                    website_summary = "I've reviewed your website and I'm impressed with what you're doing."
+
+                # Build comprehensive overview
+                overview = f"""I've reviewed your website at {domain} and here's what I learned about your business:
+
+{website_summary}
+
+I think there's a lot of potential here. I'd love to discuss your goals, challenges, and how we might be able to help you achieve them. Would you be open to scheduling a brief call to explore this further?"""
+                logger.info(f"📝 Sending overview: {overview[:100]}...")
+
+                await ws.send_json({
+                    "type": "response.text",
+                    "text": overview,
+                })
+                logger.info("✓ Overview text sent to client")
+
+                # Try overview audio (10 second timeout - longer text, needs enough time)
+                overview_sent = False
+                try:
+                    logger.info(f"Starting overview audio synthesis for {len(overview)} chars...")
+                    audio_data = await asyncio.wait_for(
+                        self._synthesize_speech(overview),
+                        timeout=10.0
+                    )
+                    if audio_data:
+                        await ws.send_json({
+                            "type": "response.audio.delta",
+                            "delta": audio_data,
+                        })
+                        await ws.send_json({
+                            "type": "response.audio.done",
+                        })
+                        logger.info(f"✓ Overview audio sent ({len(audio_data)} bytes)")
+                        overview_sent = True
+                    else:
+                        logger.warning("⚠️  Overview audio synthesis returned no data")
+                except asyncio.TimeoutError:
+                    logger.warning("⚠️  Overview audio timeout (10s) - continuing without audio")
+                except Exception as e:
+                    logger.warning(f"Overview audio error: {e}", exc_info=True)
+
+            return ""
+
+        except Exception as e:
+            logger.error(f"Error in greeting and overview: {e}", exc_info=True)
+            return ""
+
     async def _send_greeting(self, user_name: str, ws: web.WebSocketResponse) -> str:
         """
         Send an automatic greeting to the user when voice session starts.
+        Non-blocking: does not prevent user audio processing.
 
         Args:
             user_name: User's name
@@ -226,8 +400,8 @@ class VoiceServer:
             Greeting message text
         """
         try:
-            # Generate greeting from agent using optimized method
-            greeting_response = await self.agent.get_greeting()
+            # Generate greeting from agent (synchronous - no await needed)
+            greeting_response = self.agent.get_greeting()
 
             if not greeting_response:
                 logger.warning("_send_greeting: No greeting generated or already sent")
@@ -235,15 +409,182 @@ class VoiceServer:
 
             logger.info(f"_send_greeting: Generated greeting: {greeting_response}")
 
-            # Send greeting text to transcript
+            # Send greeting text immediately (non-blocking)
+            try:
+                await ws.send_json({
+                    "type": "response.text",
+                    "text": greeting_response,
+                })
+                logger.info("_send_greeting: Text sent successfully")
+            except Exception as e:
+                logger.warning(f"_send_greeting: Failed to send text: {e}")
+
+            # Try to synthesize audio with short timeout (2 seconds max)
+            # If it fails, continue without audio - user can still hear greeting text
+            try:
+                audio_data = await asyncio.wait_for(
+                    self._synthesize_speech(greeting_response),
+                    timeout=2.0  # Short timeout for greeting
+                )
+                if audio_data:
+                    await ws.send_json({
+                        "type": "response.audio.delta",
+                        "delta": audio_data,
+                    })
+                    await ws.send_json({
+                        "type": "response.audio.done",
+                    })
+                    logger.info("_send_greeting: Audio sent successfully")
+            except asyncio.TimeoutError:
+                logger.warning("_send_greeting: Audio synthesis timeout (2s) - continuing without audio")
+            except Exception as e:
+                logger.warning(f"_send_greeting: Audio synthesis error: {e}")
+
+            return greeting_response
+
+        except Exception as e:
+            logger.error(f"_send_greeting: Error sending greeting: {e}", exc_info=True)
+            return ""
+
+    async def _process_utterance(self, complete_audio: bytes, ws: web.WebSocketResponse,
+                                session_id: str, dg_client) -> bool:
+        """
+        Process a complete utterance: transcribe it and generate agent response.
+        Uses OpenAI Whisper for faster transcription, Deepgram for VAD only.
+
+        Args:
+            complete_audio: Raw PCM16 audio bytes
+            ws: WebSocket connection
+            session_id: Session ID
+            dg_client: Deepgram client (for future VAD use)
+
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            import time
+            start_time = time.time()
+            logger.info(f"🎤 Processing utterance: {len(complete_audio)} bytes")
+
+            # Create WAV file from complete audio for Whisper
+            complete_wav = self._create_wav_header(
+                complete_audio,
+                sample_rate=24000,
+                channels=1,
+                sample_width=2
+            )
+            logger.debug(f"   WAV header created in {time.time()-start_time:.2f}s")
+
+            # Transcribe with OpenAI Whisper (faster than Deepgram for this use case)
+            client = AsyncOpenAI(api_key=self.config.openai_api_key)
+
+            # Convert WAV to bytes buffer for Whisper API
+            from io import BytesIO
+            audio_buffer = BytesIO(complete_wav)
+            audio_buffer.name = "audio.wav"
+
+            stt_start = time.time()
+            transcript_response = await client.audio.transcriptions.create(
+                model=self.audio_config.stt_model,
+                file=audio_buffer,
+                language="en",
+            )
+            stt_time = time.time() - stt_start
+            logger.info(f"   Whisper STT: {stt_time:.2f}s")
+
+            final_transcript = transcript_response.text.strip() if transcript_response.text else ""
+
+            if not final_transcript:
+                logger.warning("⚠️  No transcript generated from audio")
+                return False
+
+            logger.info(f"✓ Transcribed: '{final_transcript[:80]}...'" if len(final_transcript) > 80 else f"✓ Transcribed: '{final_transcript}'")
+
+            # Save user message to database
+            if self.db and session_id in self.sessions:
+                try:
+                    session_data = self.sessions[session_id]
+                    user = await self.db.get_or_create_user(
+                        email=session_data.get("email", ""),
+                        name=session_data.get("name", ""),
+                        website_url=session_data.get("website_url", "")
+                    )
+                    session = await self.db.get_session(session_id)
+                    if session:
+                        await self.db.save_message(
+                            session_id=session.get("id"),
+                            user_id=user.get("id"),
+                            sender="user",
+                            message_text=final_transcript,
+                            transcript=final_transcript
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Error saving user message: {e}")
+
+            # Send transcript to client immediately
             await ws.send_json({
-                "type": "response.text",
-                "text": greeting_response,
+                "type": "user.transcript",
+                "text": final_transcript,
             })
 
-            # Synthesize and send greeting audio
-            audio_data = await self._synthesize_speech(greeting_response)
+            # Get agent response
+            import time
+            llm_start = time.time()
+            response_text = await self.agent.process_message(
+                final_transcript, session_id
+            )
+            llm_time = time.time() - llm_start
+            logger.info(f"   LLM response: {llm_time:.2f}s")
+
+            # If response is empty, conversation is completed - disconnect
+            if not response_text or not response_text.strip():
+                logger.info("🏁 Conversation completed. Hanging up.")
+                await ws.send_json({"type": "session.close"})
+                return True
+
+            logger.info(f"✓ Agent: '{response_text[:80]}...'" if len(response_text) > 80 else f"✓ Agent: '{response_text}'")
+
+            # Save agent message to database
+            if self.db and session_id in self.sessions:
+                try:
+                    session_data = self.sessions[session_id]
+                    user = await self.db.get_or_create_user(
+                        email=session_data.get("email", ""),
+                        name=session_data.get("name", ""),
+                        website_url=session_data.get("website_url", "")
+                    )
+                    session = await self.db.get_session(session_id)
+                    if session:
+                        await self.db.save_message(
+                            session_id=session.get("id"),
+                            user_id=user.get("id"),
+                            sender="agent",
+                            message_text=response_text
+                        )
+                except Exception as e:
+                    logger.warning(f"⚠️ Error saving agent message: {e}")
+
+            # Send agent response immediately
+            await ws.send_json({
+                "type": "response.text",
+                "text": response_text,
+            })
+
+            # Synthesize speech with Cartesia - optimized with timeout
+            tts_start = time.time()
+            try:
+                audio_data = await asyncio.wait_for(
+                    self._synthesize_speech(response_text),
+                    timeout=8.0  # Timeout after 8 seconds to prevent blocking
+                )
+                tts_time = time.time() - tts_start
+                logger.info(f"   Cartesia TTS: {tts_time:.2f}s")
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠️  TTS timeout after {time.time()-tts_start:.2f}s - sending without audio")
+                audio_data = None
+
             if audio_data:
+                logger.info(f"✓ Audio synthesized: {len(audio_data)} bytes")
                 await ws.send_json({
                     "type": "response.audio.delta",
                     "delta": audio_data,
@@ -253,13 +594,16 @@ class VoiceServer:
                     "type": "response.audio.done",
                 })
             else:
-                logger.warning("_send_greeting: Failed to synthesize greeting audio")
+                logger.warning("Failed to synthesize audio response")
 
-            return greeting_response
+            return True
 
+        except asyncio.TimeoutError:
+            logger.warning("TTS synthesis timed out - continuing without audio")
+            return True
         except Exception as e:
-            logger.error(f"_send_greeting: Error sending greeting: {e}", exc_info=True)
-            return ""
+            logger.error(f"Error processing utterance: {e}", exc_info=True)
+            return False
 
     async def _websocket_handler(self, request: web.Request) -> web.WebSocketResponse:
         """Handle WebSocket connections for voice streaming."""
@@ -274,14 +618,9 @@ class VoiceServer:
 
         # Audio accumulation for complete utterances
         audio_buffer = []
-        silence_chunks = 0
-        timeout_count = 0  # Track consecutive timeouts
-        MAX_CONSECUTIVE_TIMEOUTS = 5  # Max consecutive timeouts before reset
-        SILENCE_THRESHOLD = 2  # Number of silent chunks (~1 second) - faster response
-        MIN_SPEECH_CHUNKS = 1  # Minimum speech chunks before considering it a valid utterance
-        accumulated_transcript = ""
-        speech_chunk_count = 0
-        is_agent_speaking = False  # Track when agent is responding to avoid processing user audio
+        last_speech_time = 0  # Track when speech was last detected
+        SPEECH_TIMEOUT = 1.0  # Wait 1.0 seconds of silence after speech detected before processing (reduced from 1.5 for lower latency)
+        MIN_ACCUMULATION_TIME = 0.25  # Minimum audio to accumulate before checking (250ms, reduced from 500ms)
 
         try:
             # Initialize voice assistant
@@ -304,276 +643,123 @@ class VoiceServer:
             # Connect to Deepgram for STT
             dg_client = DeepgramClient(api_key=self.config.deepgram_api_key)
 
-            # Send automatic greeting if user info is available (after WebSocket is ready)
-            # Add a small delay to ensure all context is properly initialized
+            # Send greeting and overview in background (non-blocking)
+            greeting_task = None
+            greeting_start_time = None
+
+            # Track if user is currently speaking (turn detection)
+            user_is_speaking = False
+            last_speech_start = None
+
             if self.agent.conversation_context and self.agent.conversation_context.user_info and not greeting_sent:
-                try:
-                    logger.info(f"Sending greeting to {self.agent.conversation_context.user_info.name}")
-                    # Small delay to ensure all context is ready
-                    await asyncio.sleep(0.1)
-                    await self._send_greeting(
-                        self.agent.conversation_context.user_info.name,
-                        ws
-                    )
-                    greeting_sent = True
-                except Exception as e:
-                    logger.error(f"Error sending greeting: {e}", exc_info=True)
-            else:
-                logger.debug(f"Greeting conditions not met: context={bool(self.agent.conversation_context)}, "
-                           f"user_info={bool(self.agent.conversation_context.user_info if self.agent.conversation_context else None)}, "
-                           f"greeting_sent={greeting_sent}")
+                logger.info(f"Sending greeting to {self.agent.conversation_context.user_info.name}")
+                greeting_start_time = time.time()
+                greeting_task = asyncio.create_task(
+                    self._send_greeting_and_overview(ws)
+                )
+                greeting_sent = True
+
+            # Track when greeting is truly ready (after task completes AND audio finishes)
+            greeting_audio_finished_at = None
+
+            # Track if we're currently processing an LLM response (for interruption)
+            current_response_task = None
 
             # Listen for messages from browser
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
 
+                    # Handle interruption signal from client
+                    if data.get("type") == "input_audio_buffer.speech_started":
+                        logger.info("🛑 User started speaking - cancelling any pending response")
+                        # Cancel the current LLM response task if one is running
+                        if current_response_task and not current_response_task.done():
+                            current_response_task.cancel()
+                            logger.info("✓ Cancelled LLM response task")
+                        continue
+
                     # Handle audio data
                     if data.get("type") == "input_audio_buffer.append":
+                        # Don't process user audio until greeting is fully done
+                        should_wait_for_greeting = False
+
+                        if greeting_task and not greeting_task.done():
+                            # Greeting still sending messages
+                            logger.debug(f"⏸️ Greeting task still running, buffering audio...")
+                            should_wait_for_greeting = True
+                        elif greeting_task and greeting_task.done() and greeting_audio_finished_at is None:
+                            # Greeting task done, but need to wait for audio to finish playing
+                            # Assume 15 seconds total for greeting + overview audio playback
+                            elapsed_since_greeting_started = time.time() - greeting_start_time if greeting_start_time else 0
+
+                            # Wait minimum 15 seconds before accepting user input
+                            if elapsed_since_greeting_started < 15.0:
+                                logger.debug(f"⏸️ Greeting audio still playing ({elapsed_since_greeting_started:.1f}s/15.0s), buffering audio...")
+                                should_wait_for_greeting = True
+                            else:
+                                # Greeting audio should be finished now
+                                logger.info(f"✓ Greeting + audio complete ({elapsed_since_greeting_started:.1f}s), accepting user input")
+                                greeting_task = None
+                                greeting_audio_finished_at = time.time()
+                                # Clear any audio accumulated during greeting
+                                audio_buffer = []
+                                last_speech_time = 0
+                                logger.info("🔄 Audio buffer cleared - ready for fresh user input")
+
+                        if should_wait_for_greeting:
+                            continue
+
+                        # Mark that user is currently speaking (turn detection)
+                        user_is_speaking = True
+                        if last_speech_start is None:
+                            last_speech_start = time.time()
+                            logger.debug("👂 User started speaking")
+
                         audio_b64 = data.get("audio", "")
                         if audio_b64:
-                            # Skip processing if agent is currently speaking
-                            if is_agent_speaking:
-                                logger.debug("Agent is speaking, skipping user audio")
-                                continue
+                            current_time = time.time()
 
                             # Decode base64 to get raw PCM16 bytes
                             raw_audio_bytes = base64.b64decode(audio_b64)
 
+                            # Initialize last_speech_time on first chunk
+                            if not audio_buffer:
+                                last_speech_time = current_time
+
                             # Add to buffer for accumulation
                             audio_buffer.append(raw_audio_bytes)
 
-                            # Wrap raw PCM16 audio in WAV format for Deepgram (for VAD check)
-                            wav_audio = self._create_wav_header(
-                                raw_audio_bytes,
-                                sample_rate=24000,
-                                channels=1,
-                                sample_width=2
-                            )
+                            # Get accumulated audio size
+                            total_audio_size = sum(len(chunk) for chunk in audio_buffer)
 
-                            # Send to Deepgram just to check for speech activity (VAD)
-                            try:
-                                response = dg_client.listen.v1.media.transcribe_file(
-                                    request=wav_audio,
-                                    model=self.config.deepgram_model,
-                                    language="en",
-                                    punctuate=True,
+                            # If we have minimal audio, wait for more
+                            if total_audio_size < 24000 * 2 * 0.5:  # Less than 500ms of audio
+                                continue
+
+                            # Check if enough silence has passed since first audio chunk
+                            silence_duration = current_time - last_speech_time
+
+                            # Only process if we have 1.5+ seconds of silence
+                            should_process = silence_duration >= SPEECH_TIMEOUT and total_audio_size > 0
+
+                            if should_process:
+                                # Concatenate all accumulated audio
+                                complete_audio = b''.join(audio_buffer)
+                                logger.info(f"🎤 Processing utterance: {len(complete_audio)} bytes (user stopped speaking, {silence_duration:.2f}s silence)")
+
+                                # Process utterance and send response
+                                success = await self._process_utterance(
+                                    complete_audio, ws, session_id, dg_client
                                 )
 
-                                # Check if this chunk has speech (just for VAD, don't use transcript)
-                                has_speech = False
-                                if response and hasattr(response, 'results') and response.results:
-                                    channels = response.results.channels
-                                    if channels and len(channels) > 0:
-                                        alternatives = channels[0].alternatives
-                                        if alternatives and len(alternatives) > 0:
-                                            transcript = alternatives[0].transcript or ""
-                                            confidence = alternatives[0].confidence if hasattr(alternatives[0], 'confidence') else 0.0
-                                            if transcript and transcript.strip() and confidence > 0.3:
-                                                has_speech = True
-                                                logger.debug(f"Speech detected in chunk (confidence: {confidence:.2f})")
+                                # Reset accumulation
+                                audio_buffer = []
+                                last_speech_time = 0
 
-                                if has_speech:
-                                    # Speech detected
-                                    speech_chunk_count += 1
-                                    silence_chunks = 0
-                                else:
-                                    # Silence detected
-                                    silence_chunks += 1
-                                    logger.debug(f"Silence chunk {silence_chunks}/{SILENCE_THRESHOLD}")
-
-                                # Process when silence threshold reached AND we have enough speech
-                                if (silence_chunks >= SILENCE_THRESHOLD and
-                                    len(audio_buffer) > MIN_SPEECH_CHUNKS and
-                                    speech_chunk_count >= MIN_SPEECH_CHUNKS):
-
-                                    # Concatenate all accumulated audio
-                                    complete_audio = b''.join(audio_buffer)
-
-                                    # Create WAV file from complete audio
-                                    complete_wav = self._create_wav_header(
-                                        complete_audio,
-                                        sample_rate=24000,
-                                        channels=1,
-                                        sample_width=2
-                                    )
-
-                                    logger.info(f"Processing complete utterance: {len(complete_audio)} bytes, {speech_chunk_count} speech chunks")
-
-                                    # Send complete audio to Deepgram for transcription
-                                    final_response = dg_client.listen.v1.media.transcribe_file(
-                                        request=complete_wav,
-                                        model=self.config.deepgram_model,
-                                        language="en",
-                                        punctuate=True,
-                                    )
-
-                                    # Extract final transcript
-                                    final_transcript = ""
-                                    if final_response and hasattr(final_response, 'results') and final_response.results:
-                                        channels = final_response.results.channels
-                                        if channels and len(channels) > 0:
-                                            alternatives = channels[0].alternatives
-                                            if alternatives and len(alternatives) > 0:
-                                                final_transcript = alternatives[0].transcript or ""
-
-                                    if final_transcript and final_transcript.strip():
-                                        logger.info(f"Complete utterance transcribed: {final_transcript}")
-
-                                        # Set agent speaking flag
-                                        is_agent_speaking = True
-
-                                        # Send transcript to client
-                                        await ws.send_json({
-                                            "type": "user.transcript",
-                                            "text": final_transcript,
-                                        })
-
-                                        # Get agent response
-                                        response_text = await self.agent.process_message(
-                                            final_transcript, session_id
-                                        )
-
-                                        logger.info(f"Agent will respond: {response_text[:100]}")
-
-                                        # Send agent response
-                                        await ws.send_json({
-                                            "type": "response.text",
-                                            "text": response_text,
-                                        })
-
-                                        # Synthesize speech with Cartesia
-                                        audio_data = await self._synthesize_speech(response_text)
-                                        if audio_data:
-                                            logger.info(f"Sending audio response: {len(audio_data)} chars")
-                                            await ws.send_json({
-                                                "type": "response.audio.delta",
-                                                "delta": audio_data,
-                                            })
-                                            # Send audio completion event
-                                            await ws.send_json({
-                                                "type": "response.audio.done",
-                                            })
-                                        else:
-                                            logger.warning("Failed to synthesize audio response")
-
-                                    # Reset accumulation
-                                    audio_buffer = []
-                                    silence_chunks = 0
-                                    speech_chunk_count = 0
-                                    is_agent_speaking = False
-
-                            except Exception as e:
-                                # Check if it's a timeout error (408) - these are common and can be ignored
-                                error_msg = str(e)
-                                if "408" in error_msg or "timeout" in error_msg.lower():
-                                    logger.debug(f"Deepgram timeout (silence): {e}")
-                                    # Track consecutive timeouts
-                                    timeout_count += 1
-                                    if timeout_count > MAX_CONSECUTIVE_TIMEOUTS:
-                                        logger.warning(f"Too many consecutive timeouts ({timeout_count}), resetting buffers")
-                                        audio_buffer = []
-                                        silence_chunks = 0
-                                        timeout_count = 0
-                                        speech_chunk_count = 0
-                                        continue
-                                    
-                                    # Treat timeout as silence
-                                    silence_chunks += 1
-                                    logger.debug(f"Timeout = silence chunk {silence_chunks}/{SILENCE_THRESHOLD} (timeout_count={timeout_count})")
-
-                                    # Process if we have accumulated audio and reached threshold
-                                    if (silence_chunks >= SILENCE_THRESHOLD and
-                                        len(audio_buffer) > MIN_SPEECH_CHUNKS and
-                                        speech_chunk_count >= MIN_SPEECH_CHUNKS):
-
-                                        # Concatenate all accumulated audio
-                                        complete_audio = b''.join(audio_buffer)
-
-                                        # Create WAV file from complete audio
-                                        complete_wav = self._create_wav_header(
-                                            complete_audio,
-                                            sample_rate=24000,
-                                            channels=1,
-                                            sample_width=2
-                                        )
-
-                                        logger.info(f"Processing complete utterance (after timeout): {len(complete_audio)} bytes")
-
-                                        try:
-                                            # Send complete audio to Deepgram for transcription
-                                            final_response = dg_client.listen.v1.media.transcribe_file(
-                                                request=complete_wav,
-                                                model=self.config.deepgram_model,
-                                                language="en",
-                                                punctuate=True,
-                                            )
-
-                                            # Extract final transcript
-                                            final_transcript = ""
-                                            if final_response and hasattr(final_response, 'results') and final_response.results:
-                                                channels = final_response.results.channels
-                                                if channels and len(channels) > 0:
-                                                    alternatives = channels[0].alternatives
-                                                    if alternatives and len(alternatives) > 0:
-                                                        final_transcript = alternatives[0].transcript or ""
-
-                                            if final_transcript and final_transcript.strip():
-                                                logger.info(f"Complete utterance transcribed: {final_transcript}")
-
-                                                is_agent_speaking = True
-
-                                                await ws.send_json({
-                                                    "type": "user.transcript",
-                                                    "text": final_transcript,
-                                                })
-
-                                                response_text = await self.agent.process_message(
-                                                    final_transcript, session_id
-                                                )
-
-                                                # If response is empty, conversation is completed - disconnect
-                                                if not response_text or not response_text.strip():
-                                                    logger.info("Conversation completed. Hanging up.")
-                                                    await ws.send_json({"type": "session.close"})
-                                                    break
-
-                                                logger.info(f"Agent will respond: {response_text[:100]}")
-
-                                                await ws.send_json({
-                                                    "type": "response.text",
-                                                    "text": response_text,
-                                                })
-
-                                                audio_data = await self._synthesize_speech(response_text)
-                                                if audio_data:
-                                                    logger.info(f"Sending audio response: {len(audio_data)} chars")
-                                                    await ws.send_json({
-                                                        "type": "response.audio.delta",
-                                                        "delta": audio_data,
-                                                    })
-                                                    await ws.send_json({
-                                                        "type": "response.audio.done",
-                                                    })
-
-                                            # Reset
-                                            audio_buffer = []
-                                            silence_chunks = 0
-                                            timeout_count = 0
-                                            speech_chunk_count = 0
-                                            is_agent_speaking = False
-
-                                        except Exception as transcribe_error:
-                                            logger.error(f"Error transcribing complete audio: {transcribe_error}")
-                                            audio_buffer = []
-                                            silence_chunks = 0
-                                            timeout_count = 0
-                                            speech_chunk_count = 0
-                                            is_agent_speaking = False
-
-                                else:
-                                    logger.error(f"Error in VAD check: {e}")
-                                    # Don't reset buffers on non-timeout errors, continue accumulating
+                                # If conversation ended, break
+                                if success and self.agent.state == ConversationState.COMPLETED:
+                                    break
 
                 elif msg.type == aiohttp.WSMsgType.ERROR:
                     logger.error(f"WebSocket error: {ws.exception()}")
@@ -588,7 +774,7 @@ class VoiceServer:
 
     async def _synthesize_speech(self, text: str) -> Optional[str]:
         """
-        Synthesize speech using Cartesia TTS.
+        Synthesize speech using OpenAI TTS.
 
         Args:
             text: Text to synthesize
@@ -599,77 +785,79 @@ class VoiceServer:
         try:
             logger.info(f"Synthesizing speech: {text[:100]}...")
 
-            # Check if Cartesia API key is configured
-            if not self.config.cartesia_api_key:
-                logger.error("Cartesia API key not configured")
-                return None
+            # Use OpenAI TTS
+            client = AsyncOpenAI(api_key=self.config.openai_api_key)
 
-            async with aiohttp.ClientSession() as session:
-                headers = {
-                    "X-API-Key": self.config.cartesia_api_key,
-                    "Content-Type": "application/json",
-                    "Cartesia-Version": "2025-04-16",
-                }
+            response = await client.audio.speech.create(
+                model="tts-1",  # Fast real-time TTS
+                voice="echo",   # Professional voice
+                input=text,
+                response_format="pcm"  # Raw PCM format for compatibility
+            )
 
-                payload = {
-                    "model_id": "sonic-english",
-                    "transcript": text,
-                    "voice": {
-                        "mode": "id",
-                        "id": self.config.cartesia_voice_id,
-                    },
-                    "output_format": {
-                        "container": "raw",
-                        "encoding": "pcm_s16le",
-                        "sample_rate": 24000,
-                    }
-                }
-
-                logger.info(f"Calling Cartesia TTS API with voice ID: {self.config.cartesia_voice_id}")
-
-                async with session.post(
-                    "https://api.cartesia.ai/tts/bytes",
-                    json=payload,
-                    headers=headers,
-                    timeout=aiohttp.ClientTimeout(total=30),
-                ) as response:
-                    if response.status == 200:
-                        audio_bytes = await response.read()
-                        logger.info(f"Cartesia TTS success: {len(audio_bytes)} bytes")
-                        return base64.b64encode(audio_bytes).decode()
-                    else:
-                        error_text = await response.text()
-                        logger.error(f"Cartesia TTS error {response.status}: {error_text}")
-                        return None
+            # Get audio bytes from response
+            audio_bytes = await response.aread()
+            logger.info(f"✓ OpenAI TTS success: {len(audio_bytes)} bytes")
+            return base64.b64encode(audio_bytes).decode()
 
         except Exception as e:
-            logger.error(f"Error synthesizing speech with Cartesia: {e}", exc_info=True)
+            logger.error(f"Error synthesizing speech with OpenAI TTS: {e}", exc_info=True)
             return None
 
     async def start(self):
-        """Start the server."""
+        """Start the server with proper socket reuse handling."""
+        # Wait a moment to ensure TIME_WAIT sockets are released
+        await asyncio.sleep(1)
+        
         runner = web.AppRunner(self.app)
         await runner.setup()
-        site = web.TCPSite(runner, self.config.host, self.config.port)
-        await site.start()
-
-        logger.info(f"✓ Server listening on http://{self.config.host}:{self.config.port}")
-        logger.info(f"✓ Open http://localhost:{self.config.port} in your browser")
-        logger.info("Ready to accept connections!")
-
-        # Keep server running
-        try:
-            await asyncio.Future()
-        except KeyboardInterrupt:
-            pass
-        finally:
-            await runner.cleanup()
+        
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                site = web.TCPSite(
+                    runner,
+                    self.config.host,
+                    self.config.port,
+                    reuse_address=True,
+                    reuse_port=False
+                )
+                await site.start()
+                
+                logger.info(f"✓ Server listening on http://{self.config.host}:{self.config.port}")
+                logger.info(f"✓ Open http://localhost:{self.config.port} in your browser")
+                logger.info("Ready to accept connections!")
+                
+                # Keep server running
+                try:
+                    await asyncio.Future()
+                except KeyboardInterrupt:
+                    pass
+                finally:
+                    await runner.cleanup()
+                
+                return
+                
+            except OSError as e:
+                retry_count += 1
+                if retry_count < max_retries:
+                    logger.warning(f"Port {self.config.port} not ready (attempt {retry_count}/{max_retries}), retrying in 2s...")
+                    await runner.cleanup()
+                    await asyncio.sleep(2)
+                    runner = web.AppRunner(self.app)
+                    await runner.setup()
+                else:
+                    logger.error(f"Failed to start server after {max_retries} attempts: {e}")
+                    await runner.cleanup()
+                    raise
 
 
 async def main():
     """Main entry point."""
     logger.info("Starting Voice Agent Server")
-    logger.info("Using: Deepgram STT + OpenAI LLM + Cartesia TTS + Web Scraping")
+    logger.info("Using: OpenAI Whisper STT + OpenAI LLM + OpenAI TTS + Web Scraping")
 
     server = VoiceServer()
     await server.start()

@@ -38,8 +38,8 @@ class VoiceConfig(BaseSettings):
         description="OpenAI API key"
     )
     openai_model: str = Field(
-        default="gpt-3.5-turbo",
-        description="OpenAI LLM model"
+        default="gpt-4o-mini",
+        description="OpenAI LLM model (gpt-4o-mini is faster and cheaper than gpt-3.5-turbo)"
     )
     openai_tts_voice: str = Field(
         default="echo",
@@ -52,7 +52,7 @@ class VoiceConfig(BaseSettings):
         description="Cartesia API key (for TTS alternative)"
     )
     cartesia_voice_id: str = Field(
-        default="a167e0f3-df7e-4d52-a9c3-f949145efdab",
+        default="bd9120b6-7761-47a6-a446-77ca49132781",
         description="Cartesia voice ID"
     )
 
@@ -75,6 +75,50 @@ class VoiceConfig(BaseSettings):
         env_file = ".env"
         case_sensitive = False
         extra = "ignore"  # Ignore extra environment variables
+
+
+class AudioConfig(BaseSettings):
+    """Configuration for audio processing and voice activity detection."""
+
+    # Voice Activity Detection (VAD) parameters
+    silence_threshold: int = Field(
+        default=3,
+        description="Number of silence chunks before processing (each chunk ~500ms)"
+    )
+    min_speech_chunks: int = Field(
+        default=2,
+        description="Minimum number of speech chunks required (~1 second of speech)"
+    )
+    max_consecutive_timeouts: int = Field(
+        default=5,
+        description="Maximum consecutive timeouts before resetting audio buffer"
+    )
+
+    # Audio encoding
+    sample_rate: int = Field(default=24000, description="Audio sample rate in Hz")
+    channels: int = Field(default=1, description="Number of audio channels (mono)")
+    sample_width: int = Field(default=2, description="Bytes per sample (PCM16 = 2 bytes)")
+
+    # STT Model configuration
+    stt_model: str = Field(
+        default="whisper-1",
+        description="OpenAI Whisper model for speech-to-text"
+    )
+    deepgram_vad_model: str = Field(
+        default="nova-2",
+        description="Deepgram model for VAD checking (lighter weight)"
+    )
+
+    # TTS configuration
+    tts_model: str = Field(
+        default="sonic-english",
+        description="Cartesia model for text-to-speech"
+    )
+
+    class Config:
+        env_file = ".env"
+        case_sensitive = False
+        extra = "ignore"
 
 
 class AgentConfig(BaseSettings):
@@ -217,6 +261,11 @@ CRITICAL - ABSOLUTE DO NOTs:
 def get_voice_config() -> VoiceConfig:
     """Get voice configuration from environment."""
     return VoiceConfig()
+
+
+def get_audio_config() -> AudioConfig:
+    """Get audio processing configuration from environment."""
+    return AudioConfig()
 
 
 def get_agent_config() -> AgentConfig:

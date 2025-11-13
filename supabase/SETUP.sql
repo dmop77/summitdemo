@@ -1,0 +1,34 @@
+-- SETUP INSTRUCTIONS FOR VOICE AGENT DATABASE
+--
+-- 1. Create a new Supabase project at https://supabase.com
+--
+-- 2. Get your project URL and API key:
+--    - Go to Settings > API
+--    - Copy Project URL (SUPABASE_URL)
+--    - Copy anon public key (SUPABASE_KEY)
+--
+-- 3. Apply migrations in order:
+--    - Open Supabase SQL Editor
+--    - Run: migrations/001_initial_schema.sql (creates all tables)
+--    - Run: migrations/002_rls_policies.sql (enables row-level security)
+--    - Run: migrations/003_functions_and_views.sql (adds analytics functions)
+--    - Run: migrations/004_advanced_features.sql (full-text search, events, health scoring)
+--
+-- 4. Update your .env file:
+--    SUPABASE_URL=https://your-project.supabase.co
+--    SUPABASE_KEY=eyJhbGc...
+--
+-- 5. Install Python dependencies:
+--    pip install -r requirements.txt
+--
+-- 6. Run the agent:
+--    python agent/main.py
+--
+-- The database will automatically cache:
+-- ✓ User information (name, email, website)
+-- ✓ Session data
+-- ✓ Scraped website content
+-- ✓ Conversation messages
+-- ✓ Scheduled appointments
+--
+-- Query user data using SQL from migrations/005_useful_queries.sql

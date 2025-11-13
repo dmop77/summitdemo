@@ -412,6 +412,8 @@
         let audioQueue = [];
         let isPlaying = false;
         let nextPlaybackTime = 0;
+        let currentAudio = null;  // Track currently playing audio for interruption
+        let userStartedSpeaking = false;  // Track if user is currently speaking (for interruption)
 
         function updateOrbState(state) {
             orb.classList.remove('speaking', 'listening', 'connecting');
@@ -479,17 +481,23 @@
                 console.log('Audio context state:', audioContext.state);
                 console.log('Audio context sample rate:', audioContext.sampleRate);
                 
-                // Get microphone access
+                // Get microphone access with aggressive echo/noise cancellation
                 console.log('Requesting microphone access...');
-                audioStream = await navigator.mediaDevices.getUserMedia({ 
+                audioStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         sampleRate: 24000,
                         channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        latency: 0.01
-                    } 
+                        echoCancellation: true,        // Enable echo cancellation
+                        noiseSuppression: true,        // Enable noise suppression
+                        autoGainControl: false,        // Disable auto gain (we'll handle it)
+                        latency: 0.01,
+                        // Advanced options for better echo cancellation
+                        advancedOptions: {
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            typingNoiseDetection: true
+                        }
+                    }
                 });
                 
                 if (!audioStream) {
@@ -504,15 +512,18 @@
                 console.log('Got audio stream, creating media stream source...');
                 microphone = audioContext.createMediaStreamSource(audioStream);
                 
-                // Create audio worklet for processing
+                // Create audio worklet for processing with noise filtering
                 await audioContext.audioWorklet.addModule(`data:text/javascript,
                     class AudioProcessor extends AudioWorkletProcessor {
                         constructor() {
                             super();
-                            // Increase buffer to ~500ms for better transcription
-                            this.bufferSize = 12000;  // 500ms at 24kHz
+                            this.bufferSize = 6000;  // 250ms at 24kHz (reduced from 500ms for lower latency)
                             this.buffer = new Float32Array(this.bufferSize);
                             this.bufferIndex = 0;
+
+                            // Noise filtering
+                            this.noiseThreshold = 0.02;  // Ignore audio below this amplitude
+                            this.silenceThreshold = 0.01;  // Very quiet audio is likely noise
                         }
 
                         process(inputs, outputs, parameters) {
@@ -520,19 +531,45 @@
                             if (input && input.length > 0) {
                                 const channelData = input[0];
 
-                                // Accumulate audio data
+                                // Accumulate audio data with noise filtering
                                 for (let i = 0; i < channelData.length; i++) {
-                                    this.buffer[this.bufferIndex] = channelData[i];
+                                    let sample = channelData[i];
+
+                                    // Apply noise gate - filter out very quiet audio
+                                    const amplitude = Math.abs(sample);
+                                    if (amplitude < this.silenceThreshold) {
+                                        sample = 0;  // Zero out very quiet samples
+                                    }
+
+                                    this.buffer[this.bufferIndex] = sample;
                                     this.bufferIndex++;
 
                                     // Send buffer when full
                                     if (this.bufferIndex >= this.bufferSize) {
-                                        const pcm16 = new Int16Array(this.bufferSize);
-                                        for (let j = 0; j < this.bufferSize; j++) {
-                                            const s = Math.max(-1, Math.min(1, this.buffer[j]));
-                                            pcm16[j] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                                        // Check if buffer has meaningful audio (not just noise)
+                                        let hasSignificantAudio = false;
+                                        for (let k = 0; k < this.bufferSize; k++) {
+                                            if (Math.abs(this.buffer[k]) > this.noiseThreshold) {
+                                                hasSignificantAudio = true;
+                                                break;
+                                            }
                                         }
-                                        this.port.postMessage(pcm16.buffer);
+
+                                        // Only send buffer if it has real audio
+                                        if (hasSignificantAudio) {
+                                            const pcm16 = new Int16Array(this.bufferSize);
+                                            for (let j = 0; j < this.bufferSize; j++) {
+                                                const s = Math.max(-1, Math.min(1, this.buffer[j]));
+                                                pcm16[j] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                                            }
+                                            this.port.postMessage({
+                                                type: 'audio',
+                                                data: pcm16.buffer
+                                            });
+                                        } else {
+                                            console.log('Skipped silent buffer');
+                                        }
+
                                         this.bufferIndex = 0;
                                     }
                                 }
@@ -544,9 +581,37 @@
                 `);
                 
                 const processorNode = new AudioWorkletNode(audioContext, 'audio-processor');
+
                 processorNode.port.onmessage = (event) => {
                     if (realtimeWs && realtimeWs.readyState === WebSocket.OPEN) {
-                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(event.data)));
+                        // Handle both old format (raw buffer) and new format (with type)
+                        let audioData = event.data;
+                        if (event.data && event.data.type === 'audio') {
+                            audioData = event.data.data;
+                        }
+
+                        // Notify server that user started speaking (for interruption)
+                        if (!userStartedSpeaking && audioData && audioData.byteLength > 0) {
+                            // Check if this audio buffer has significant content
+                            const view = new Int16Array(audioData);
+                            let hasSignificantAudio = false;
+                            for (let i = 0; i < Math.min(100, view.length); i++) {
+                                if (Math.abs(view[i]) > 200) {  // Threshold for significant audio
+                                    hasSignificantAudio = true;
+                                    break;
+                                }
+                            }
+
+                            if (hasSignificantAudio) {
+                                userStartedSpeaking = true;
+                                console.log('👂 Sending speech_started signal to server');
+                                realtimeWs.send(JSON.stringify({
+                                    type: 'input_audio_buffer.speech_started'
+                                }));
+                            }
+                        }
+
+                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(audioData)));
                         realtimeWs.send(JSON.stringify({
                             type: 'input_audio_buffer.append',
                             audio: base64Audio
@@ -569,7 +634,7 @@
 
         function playAudioChunk(base64Audio, mimeType) {
             try {
-                console.log('Playing audio chunk, base64 length:', base64Audio.length);
+                console.log('Queuing audio chunk, base64 length:', base64Audio.length);
 
                 // Decode base64 to binary
                 const binaryString = atob(base64Audio);
@@ -581,8 +646,7 @@
 
                 console.log('Audio data size:', bytes.length, 'bytes');
 
-                // For raw PCM audio from Cartesia, we need to wrap it in WAV format
-                // The audio is PCM_S16LE at 24000 Hz, mono
+                // For raw PCM audio, wrap it in WAV format
                 let audioBlob;
 
                 if (!mimeType || mimeType.includes('pcm') || mimeType.includes('raw')) {
@@ -607,19 +671,18 @@
 
                 const audioUrl = URL.createObjectURL(audioBlob);
 
-                // Create and play audio element
-                const audio = new Audio(audioUrl);
-                audio.play().then(() => {
-                    console.log('Audio playing successfully');
-                }).catch(err => {
-                    console.error('Error playing audio:', err);
-                    showError('Failed to play audio: ' + err.message);
+                // Add to queue for sequential playback
+                audioQueue.push({
+                    url: audioUrl,
+                    duration: 0  // Will be set when audio element is created
                 });
 
-                // Cleanup URL after playback
-                audio.onended = () => {
-                    URL.revokeObjectURL(audioUrl);
-                };
+                console.log('Audio queued. Queue length:', audioQueue.length, 'Currently playing:', isPlaying);
+
+                // Start playback if not already playing
+                if (!isPlaying) {
+                    playNextAudio();
+                }
 
                 return true;
             } catch (error) {
@@ -627,6 +690,75 @@
                 showError('Error playing audio: ' + error.message);
                 return false;
             }
+        }
+
+        function playNextAudio() {
+            if (audioQueue.length === 0) {
+                console.log('Audio queue empty, playback complete');
+                isPlaying = false;
+                currentAudio = null;
+                return;
+            }
+
+            const audioItem = audioQueue.shift();
+            isPlaying = true;
+
+            console.log('Playing audio from queue. Remaining:', audioQueue.length);
+
+            // Create and play audio element
+            const audio = new Audio(audioItem.url);
+            currentAudio = audio;  // Track current audio for interruption
+
+            audio.onended = () => {
+                console.log('Audio chunk finished, moving to next');
+                URL.revokeObjectURL(audioItem.url);
+                currentAudio = null;
+
+                // Play next audio in queue
+                if (audioQueue.length > 0) {
+                    playNextAudio();
+                } else {
+                    isPlaying = false;
+                    console.log('All audio chunks played');
+                }
+            };
+
+            audio.onerror = (err) => {
+                console.error('Error playing audio:', err);
+                URL.revokeObjectURL(audioItem.url);
+                currentAudio = null;
+                isPlaying = false;
+            };
+
+            audio.play().then(() => {
+                console.log('Audio element now playing');
+            }).catch(err => {
+                console.error('Error starting audio playback:', err);
+                showError('Failed to play audio: ' + err.message);
+                URL.revokeObjectURL(audioItem.url);
+                currentAudio = null;
+                isPlaying = false;
+            });
+        }
+
+        function stopAudioPlayback() {
+            console.log('🛑 Stopping audio playback (user interrupted)');
+
+            // Stop current audio
+            if (currentAudio) {
+                currentAudio.pause();
+                currentAudio.currentTime = 0;
+                currentAudio = null;
+            }
+
+            // Clear entire queue
+            audioQueue.forEach(item => {
+                URL.revokeObjectURL(item.url);
+            });
+            audioQueue = [];
+
+            isPlaying = false;
+            console.log('Audio playback stopped and queue cleared');
         }
 
         function createWavHeader(dataLength, sampleRate = 24000, channels = 1, bitsPerSample = 16) {
@@ -672,7 +804,8 @@
                 updateOrbState('connecting');
 
                 // Connect to Voice Agent server WebSocket
-                const PROXY_URL = 'ws://localhost:8084/ws';
+                const sessionId = sessionStorage.getItem('sessionId');
+                const PROXY_URL = `ws://localhost:8084/ws?session_id=${sessionId}`;
                 
                 console.log('Connecting to local proxy server:', PROXY_URL);
                 realtimeWs = new WebSocket(PROXY_URL);
@@ -743,8 +876,15 @@
                         } else if (data.type === 'input_audio_buffer.speech_started') {
                             updateOrbState('listening');
                             updateStatus('Listening to you...');
+                            // User started speaking - interrupt agent if it's still speaking
+                            if (isPlaying) {
+                                console.log('User interrupted agent speech');
+                                stopAudioPlayback();
+                            }
                         } else if (data.type === 'input_audio_buffer.speech_stopped') {
                             updateStatus('Processing...');
+                            // Reset for next utterance
+                            userStartedSpeaking = false;
                         }
                     } catch (error) {
                         console.error('Error parsing message:', error);
@@ -759,11 +899,15 @@
                 realtimeWs.onclose = (event) => {
                     console.log('Disconnected from proxy server', event.code, event.reason);
                     isConnected = false;
+
+                    // Stop audio playback
+                    stopAudioPlayback();
+
                     updateStatus('Disconnected');
                     updateOrbState('idle');
                     connectBtn.disabled = false;
                     disconnectBtn.disabled = true;
-                    
+
                     if (audioContext) {
                         audioContext.close();
                         audioContext = null;
@@ -772,12 +916,13 @@
                         audioStream.getTracks().forEach(track => track.stop());
                         audioStream = null;
                     }
-                    
+
                     // Reset audio playback state
                     audioQueue = [];
                     isPlaying = false;
                     nextPlaybackTime = 0;
-                    
+                    currentAudio = null;
+
                     // Show error if not a clean disconnect
                     if (event.code !== 1000 && event.code !== 1005) {
                         showError(`Connection lost (${event.code}): ${event.reason || 'Unknown reason'}`);
@@ -794,26 +939,30 @@
         }
 
         function disconnect() {
+            // Stop audio playback
+            stopAudioPlayback();
+
             if (realtimeWs) {
                 realtimeWs.close();
                 realtimeWs = null;
             }
-            
+
             if (audioContext) {
                 audioContext.close();
                 audioContext = null;
             }
-            
+
             if (audioStream) {
                 audioStream.getTracks().forEach(track => track.stop());
                 audioStream = null;
             }
-            
+
             // Reset audio playback state
             audioQueue = [];
             isPlaying = false;
             nextPlaybackTime = 0;
-            
+            currentAudio = null;
+
             updateStatus('Disconnected');
             updateOrbState('idle');
             connectBtn.disabled = false;

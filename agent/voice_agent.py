@@ -19,7 +19,8 @@ from pydantic_ai.models.openai import OpenAIChatModel
 
 from config import get_voice_config, get_agent_config
 from schemas import ConversationContext, UserInfo
-from agent_tools import AppointmentScheduler
+from agent_tools import AppointmentScheduler, parse_appointment_time
+from db_client import SupabaseClient
 
 logger = logging.getLogger(__name__)
 
@@ -28,10 +29,8 @@ class ConversationState:
     """Track conversation state for the agent."""
 
     GREETING = "greeting"
-    CONVERSATION = "conversation"
-    APPOINTMENT_PROPOSAL = "appointment_proposal"
-    TIME_COLLECTION = "time_collection"
-    SCHEDULING = "scheduling"
+    ENGAGEMENT = "engagement"  # User is asking questions - answer them and keep proposing appointment
+    TIME_COLLECTION = "time_collection"  # User agreed to appointment - collect preferred time
     COMPLETED = "completed"
 
 
@@ -43,13 +42,19 @@ class BackgroundAgent:
         self.voice_config = get_voice_config()
         self.agent_config = get_agent_config()
 
+        # Initialize conversation context first (before building system prompt)
+        self.conversation_context: Optional[ConversationContext] = None
+        self.state = ConversationState.GREETING
+        self.conversation_history: list = []  # Track conversation for summary
+        self._context_cache = {}  # Cache built context to avoid rebuilding
+
         # Initialize appointment scheduler
         self.scheduler = AppointmentScheduler(
             openai_api_key=self.voice_config.openai_api_key,
             pulpoo_api_key=self.voice_config.pulpoo_api_key,
         )
 
-        # Create Pydantic AI agent
+        # Create Pydantic AI agent (now conversation_context is initialized)
         model = OpenAIChatModel(model_name=self.voice_config.openai_model)
         self.agent = Agent(
             model=model,
@@ -57,41 +62,62 @@ class BackgroundAgent:
             system_prompt=self._build_system_prompt(),
         )
 
-        self.conversation_context: Optional[ConversationContext] = None
-        self.state = ConversationState.GREETING
-        self.conversation_history: list = []  # Track conversation for summary
-
     def _build_system_prompt(self) -> str:
-        """Build dynamic system prompt based on context."""
-        prompt = """You are a friendly appointment scheduling assistant guiding users through a natural conversation.
+        """Build system prompt with user context for the conversation.
 
-YOUR CONVERSATION FLOW:
-1. Greet warmly with their name
-2. Share interesting insight about their business (1-2 sentences, natural tone)
-3. Ask an engaging follow-up question about their business or needs
-4. Guide toward scheduling with interest ("This sounds great! We should schedule time to discuss this further")
-5. Ask for their preferred time in a natural way
-6. Once they provide time: Schedule immediately and confirm with "Perfect! See you then."
+        This is called once at initialization and includes user context
+        so the agent remembers who they're talking to throughout the conversation.
+        """
+        prompt = """You are a friendly business consultant helping schedule appointments.
 
-TONE & STYLE:
-- Sound like a real person having a conversation, not a robot
-- Be genuinely interested in their business
-- Use conversational phrases like "So you work with...", "That's interesting because..."
-- Ask clarifying questions to engage them
-- Guide naturally toward scheduling (don't force it)
+GOAL: Help the user schedule an appointment to discuss their business needs in detail.
 
-SCHEDULING RULES:
-- When user mentions ANY time: Use schedule_appointment_tool immediately
-- Time format: ISO "YYYY-MM-DDTHH:MM:SS" (convert relative dates to actual dates)
-- After successful scheduling: Only say "Perfect! See you then." and STOP
+CONVERSATION FLOW:
+1. [GREETING DONE]: The greeting + scraped website overview has already been sent
+2. [USER ENGAGEMENT]: User responds with questions about what was scraped
+   - Answer their question briefly (1-2 sentences)
+   - Be knowledgeable about what you learned from their website
+3. [ALWAYS PROPOSE APPOINTMENT]: After every answer, propose scheduling
+   - Examples: "This is interesting! I'd love to dive deeper. Are you free next week?"
+   - Or: "That makes sense. Shall we set up a call to explore this further?"
+4. [ANSWER MORE QUESTIONS]: If they ask more questions, answer them and propose again
+   - Keep doing this until they agree to schedule
+5. [COLLECT TIME]: When they agree to appointment, ask for preferred date/time
+   - Accept natural language times like "tomorrow at 2pm", "next Monday at 3pm", "next week"
+6. [SCHEDULE]: Call schedule_appointment_tool with their exact time (as spoken)
+   - Pass the time exactly as user said it - system will parse it
+   - Examples: "tomorrow at 2 PM", "next week Monday at 3 PM", "2025-11-15T14:30:00"
+7. [CLOSE]: Say ONLY "Perfect! See you then." and STOP
 
-CONVERSATION STATES:
-- GREETING: Introduce yourself and their business
-- CONVERSATION: Chat naturally and understand their needs  
-- TIME_COLLECTION: Ask for their preferred time
-- After scheduling: Say confirmation and STOP
+CRITICAL RULES:
+- You already have: user name, email, website info (NEVER ask again)
+- Be ready to answer unlimited questions about their business
+- After each answer, always propose scheduling in a natural way
+- When user agrees (says "yes", "sure", "sounds good", or provides a time), move to time collection
+- When user provides time, call schedule_appointment_tool with EXACTLY what they said
+- The system auto-parses times like "tomorrow at 2pm", "next week", "Monday at 3 PM", etc.
+- After scheduling, say ONLY "Perfect! See you then."
 
-Keep responses natural (2-4 sentences), never more than one paragraph."""
+TONE: Warm, professional, curious, genuinely interested in their business.
+
+APPOINTMENT FOCUS: Answer their questions freely, but always guide back to scheduling the call."""
+
+        # Inject user context
+        if self.conversation_context and self.conversation_context.user_info:
+            user = self.conversation_context.user_info
+            website_summary = ""
+            if hasattr(user, 'website_summary') and user.website_summary:
+                website_summary = f"\n\nWhat we learned about their business:\n{user.website_summary[:400]}"  # First 400 chars
+
+            context = f"""
+
+USER INFORMATION (KNOWN FACTS):
+- Name: {user.name}
+- Email: {user.email}
+- Website: {user.website_url}{website_summary}
+
+NEVER ask for name or email again. Use this information to provide personalized, relevant responses."""
+            prompt += context
 
         return prompt
 
@@ -107,7 +133,7 @@ Keep responses natural (2-4 sentences), never more than one paragraph."""
         Args:
             ctx: Run context
             topic: What the appointment is about
-            preferred_time: Time in ISO format (e.g., "2025-11-15T14:30:00")
+            preferred_time: Time (can be ISO format or natural language like "tomorrow at 2pm")
             summary: Brief summary of the conversation
 
         Returns:
@@ -115,6 +141,14 @@ Keep responses natural (2-4 sentences), never more than one paragraph."""
         """
         if not self.conversation_context or not self.conversation_context.user_info:
             return "Error: User information not available"
+
+        # Parse the time - handle natural language or ISO format
+        parsed_time = parse_appointment_time(preferred_time)
+        if not parsed_time:
+            logger.warning(f"Failed to parse appointment time: {preferred_time}")
+            return f"I couldn't understand that time: '{preferred_time}'. Please say something like 'tomorrow at 2pm' or 'next Monday at 3 PM'"
+
+        logger.info(f"Parsed appointment time: {preferred_time} → {parsed_time}")
 
         # Build conversation summary from history if not provided
         if not summary and hasattr(self, 'conversation_history') and self.conversation_history:
@@ -126,7 +160,7 @@ Keep responses natural (2-4 sentences), never more than one paragraph."""
             user_name=self.conversation_context.user_info.name,
             user_email=self.conversation_context.user_info.email,
             appointment_topic=topic,
-            preferred_date=preferred_time,
+            preferred_date=parsed_time,
             summary_notes=summary,
         )
 
@@ -138,7 +172,8 @@ Keep responses natural (2-4 sentences), never more than one paragraph."""
             # If scheduling fails (e.g., invalid date), ask agent to retry
             # Don't change state - stay in TIME_COLLECTION
             error_msg = result.get('error', 'Unable to schedule')
-            return f"Could you provide a valid future date? {error_msg}"
+            logger.warning(f"Failed to schedule appointment: {error_msg}")
+            return f"I had trouble booking that time. {error_msg}. Could you try a different time?"
 
     async def process_message(self, user_input: str, session_id: str) -> str:
         """Process user message and return agent response.
@@ -153,83 +188,59 @@ Keep responses natural (2-4 sentences), never more than one paragraph."""
         # If conversation is already completed, don't process more messages
         if self.state == ConversationState.COMPLETED:
             return ""
-        
+
         try:
             # Initialize context if needed
             if self.conversation_context is None:
                 self.conversation_context = ConversationContext(session_id=session_id)
 
-            # Build context-aware prompt
-            context_info = ""
-            if self.conversation_context.user_info:
-                user = self.conversation_context.user_info
-                context_info = f"""
-CONTEXT (known to you, don't ask for it):
-- User name: {user.name}
-- User email: {user.email}
-- Website: {user.website_url}
-- Website summary: {user.website_summary if hasattr(user, 'website_summary') else 'Not available'}
-"""
+            # Build turn prompt with conversation history for context
+            # This ensures the agent remembers what was said before
+            history_str = ""
+            if self.conversation_history:
+                # Include last 4 messages (2 exchanges) for context
+                history_str = "\n".join(self.conversation_history[-4:])
+                history_str = f"Recent conversation:\n{history_str}\n\n"
 
-            # Add state-specific guidance
-            state_guidance = ""
-            if self.state == ConversationState.TIME_COLLECTION:
-                state_guidance = """
-The user has agreed to schedule. Now extract their preferred time from their message.
-If they give a time, schedule the appointment immediately.
-If unclear, ask for clarification."""
+            turn_prompt = f"{history_str}User message: {user_input}"
 
-            # Prepare the full prompt for this turn with appointment guidance
-            appointment_guidance = ""
-            if self.state == ConversationState.CONVERSATION:
-                appointment_guidance = """
-IMPORTANT: Push toward scheduling QUICKLY. Don't have a long discussion.
-If user responds: Say "Great! When would you be available for a call?"
-If they give a time: Use the scheduling tool immediately.
-Keep everything SHORT - 1-2 sentences max per response."""
-            
-            turn_prompt = f"""{context_info}
-
-{state_guidance}
-
-{appointment_guidance}
-
-User message: {user_input}
-
-CRITICAL RULES:
-- Keep response to 1-2 sentences MAXIMUM
-- DON'T start with "Hi [name]" - only use that in initial greeting
-- Be conversational and natural, not scripted
-- If they mention a time: Extract it and use the scheduling tool
-- If they ask questions: Answer briefly then ask for time
-- Focus on getting a specific time for the appointment"""
-
-            # Run the agent
+            # Run the agent with context
             result = await self.agent.run(turn_prompt)
             # Extract output from AgentRunResult object
             response_text = result.output if hasattr(result, 'output') else str(result)
 
             logger.info(f"Agent response: {response_text}")
-            
-            # Track conversation history for summary
+
+            # Track conversation history for summary (minimal - just last exchange)
             self.conversation_history.append(f"User: {user_input}")
             self.conversation_history.append(f"Agent: {response_text}")
+            # Keep only last 6 messages to reduce memory
+            if len(self.conversation_history) > 6:
+                self.conversation_history = self.conversation_history[-6:]
 
-            # Update state based on conversation flow and trigger smart prompting
+            # Update state based on conversation flow
             user_lower = user_input.lower()
-            
-            # Detect if user is ready for scheduling
-            scheduling_keywords = ["when", "time", "schedule", "book", "appointment", 
-                                 "available", "tomorrow", "next", "monday", "tuesday", 
+
+            # Move from greeting to engagement on first user message
+            if self.state == ConversationState.GREETING:
+                self.state = ConversationState.ENGAGEMENT
+                logger.info("✓ User engaged - in conversation mode. Answer questions and propose appointment.")
+
+            # Detect if user is agreeing to appointment or providing time
+            agreement_keywords = ["yes", "yeah", "sure", "sounds good", "ok", "okay", "agree", "absolutely",
+                                "definitely", "works for me", "perfect", "let's do it", "let's schedule"]
+
+            scheduling_keywords = ["when", "time", "schedule", "book", "appointment",
+                                 "available", "tomorrow", "next", "monday", "tuesday",
                                  "wednesday", "thursday", "friday", "saturday", "sunday",
                                  "today", "week", "month", "afternoon", "morning", "evening",
-                                 "am", "pm", "o'clock", "oclock", "pm", "noon", "midnight"]
-            
-            if any(word in user_lower for word in scheduling_keywords) and self.state != ConversationState.TIME_COLLECTION:
-                self.state = ConversationState.TIME_COLLECTION
-            elif self.state == ConversationState.GREETING:
-                # After greeting, move to conversation
-                self.state = ConversationState.CONVERSATION
+                                 "am", "pm", "o'clock", "oclock", "noon", "midnight"]
+
+            # If user agrees to appointment or provides a time while in engagement
+            if self.state == ConversationState.ENGAGEMENT:
+                if any(word in user_lower for word in agreement_keywords) or any(word in user_lower for word in scheduling_keywords):
+                    self.state = ConversationState.TIME_COLLECTION
+                    logger.info("✓ User agreed to appointment - now collecting time preference")
 
             return response_text
 
@@ -237,46 +248,32 @@ CRITICAL RULES:
             logger.error(f"Error in agent: {e}", exc_info=True)
             return "I encountered an error. Could you please repeat that?"
 
-    async def get_greeting(self) -> str:
-        """Generate a greeting message for the user.
+    def get_greeting(self) -> str:
+        """Generate a fast, engaging greeting that starts the conversation.
 
         Returns:
             Greeting message
         """
         try:
             if not self.conversation_context or not self.conversation_context.user_info:
-                return "Hi there! I'm ready to help you schedule an appointment."
+                return "Hi there! Thanks for joining. What brings you here today?"
 
             user = self.conversation_context.user_info
-            # Handle both string and ScrapedContent object
-            if hasattr(user, 'website_summary'):
-                if isinstance(user.website_summary, str):
-                    website_summary = user.website_summary
-                else:
-                    # If it's a ScrapedContent object, get the summary field
-                    website_summary = user.website_summary.summary if hasattr(user.website_summary, 'summary') else str(user.website_summary)
-            else:
-                website_summary = 'Not available'
-            
-            greeting_prompt = f"""Generate EXACTLY this format (fill in brackets):
-"Hi {user.name}! I see you're interested in [SERVICE]. From what I understand, [BRIEF INSIGHT]. Would you like to talk about it further over a call?"
 
-Summary: {website_summary}
+            # Extract website domain for context
+            website_domain = user.website_url.replace("https://", "").replace("http://", "").split("/")[0] if user.website_url else "your business"
 
-Just fill in the brackets naturally. Keep it short."""
+            # More engaging greeting that invites conversation
+            greeting = f"Hi {user.name}! I see you're interested in {website_domain}. Tell me, what brought you here today and what are you looking to accomplish?"
 
-            result = await self.agent.run(greeting_prompt)
-            # Extract output from AgentRunResult object
-            greeting_text = result.output if hasattr(result, 'output') else str(result)
-            greeting_text = greeting_text.strip()
-            logger.info(f"Generated greeting: {greeting_text}")
-            return greeting_text
+            logger.info(f"Generated greeting: {greeting}")
+            return greeting
 
         except Exception as e:
             logger.error(f"Error generating greeting: {e}", exc_info=True)
-            # Fallback greeting if agent fails
+            # Fallback greeting if anything fails
             user_name = self.conversation_context.user_info.name if self.conversation_context and self.conversation_context.user_info else "there"
-            return f"Hi {user_name}! Thanks for joining. Let's discuss scheduling an appointment."
+            return f"Hi {user_name}! Thanks for joining. What brought you here today?"
 
     def set_user_info(self, name: str, email: str, website_url: str, website_summary: str = ""):
         """Set user information from setup phase.

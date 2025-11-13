@@ -10,6 +10,9 @@ deepgram-sdk>=3.8.0
 # Web Server
 aiohttp>=3.9.0
 
+# Database
+supabase>=2.0.0
+
 # Environment
 python-dotenv>=1.0.0
 
