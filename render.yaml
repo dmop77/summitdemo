@@ -1,0 +1,71 @@
+services:
+  - type: web
+    name: voice-agent-server
+    runtime: python
+    pythonVersion: "3.11"
+
+    # Build configuration
+    buildCommand: |
+      cd agent && \
+      pip install --upgrade pip && \
+      pip install -r requirements.txt
+
+    # Start command
+    startCommand: cd agent && python main.py
+
+    # Environment variables
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+
+      - key: DEEPGRAM_API_KEY
+        sync: false
+
+      - key: CARTESIA_API_KEY
+        sync: false
+
+      - key: PULPOO_API_KEY
+        sync: false
+
+      - key: SUPABASE_URL
+        sync: false
+
+      - key: SUPABASE_KEY
+        sync: false
+
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      - key: SUPABASE_ACCESS_TOKEN
+        sync: false
+
+      - key: LIVEKIT_URL
+        sync: false
+
+      - key: LIVEKIT_API_KEY
+        sync: false
+
+      - key: LIVEKIT_API_SECRET
+        sync: false
+
+      - key: WEBSOCKET_PORT
+        value: "8084"
+
+      - key: LOG_LEVEL
+        value: "INFO"
+
+      - key: PYTHONUNBUFFERED
+        value: "1"
+
+    # Health check
+    healthCheckPath: /
+
+    # Resource allocation
+    plan: standard
+
+    # Auto-deploy on push
+    autoDeploy: true
+
+    # Regions available: us-east-1, us-west-1, eu-west-1, ap-southeast-1, etc.
+    # Choose based on your target users
+    # region: us-east-1
